@@ -37,7 +37,7 @@ jobs:
           name: ${{ matrix.target }}
           path: ${{ env.BIN_NAME }}-${{ matrix.target }}.tar.gz
 
-  build-macos:
+  build-macos: # compile-check only — Homebrew installs from source
     strategy:
       matrix:
         include:
@@ -99,10 +99,8 @@ jobs:
           VERSION="${{ github.ref_name }}"
           VERSION_NO_V="${VERSION#v}"
 
-          HASH_AARCH64_DARWIN=$(grep "jqpp-aarch64-apple-darwin.tar.gz"       artifacts/SHA256SUMS | awk '{print $1}')
-          HASH_X86_64_DARWIN=$(grep  "jqpp-x86_64-apple-darwin.tar.gz"        artifacts/SHA256SUMS | awk '{print $1}')
-          HASH_AARCH64_LINUX=$(grep  "jqpp-aarch64-unknown-linux-gnu.tar.gz"  artifacts/SHA256SUMS | awk '{print $1}')
-          HASH_X86_64_LINUX=$(grep   "jqpp-x86_64-unknown-linux-gnu.tar.gz"   artifacts/SHA256SUMS | awk '{print $1}')
+          TARBALL_URL="https://github.com/sukkola/jqpp/archive/refs/tags/${VERSION}.tar.gz"
+          SHA=$(curl -fsSL "${TARBALL_URL}" | sha256sum | awk '{print $1}')
 
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/sukkola/homebrew-tap.git" tap
           cd tap
@@ -111,32 +109,14 @@ jobs:
           class Jqpp < Formula
             desc "A robust TUI for interactively exploring JSON with jq-like queries"
             homepage "https://github.com/sukkola/jqpp"
-            version "${VERSION_NO_V}"
+            url "${TARBALL_URL}"
+            sha256 "${SHA}"
+            license "MIT"
 
-            on_macos do
-              on_arm do
-                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-aarch64-apple-darwin.tar.gz"
-                sha256 "${HASH_AARCH64_DARWIN}"
-              end
-              on_intel do
-                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-x86_64-apple-darwin.tar.gz"
-                sha256 "${HASH_X86_64_DARWIN}"
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${HASH_AARCH64_LINUX}"
-              end
-              on_intel do
-                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${HASH_X86_64_LINUX}"
-              end
-            end
+            depends_on "rust" => :build
 
             def install
-              bin.install "jqpp"
+              system "cargo", "install", *std_cargo_args
             end
 
             test do
