@@ -1,0 +1,77 @@
+{
+  "store_id": "STORE-001",
+  "store_name": "Nordic Widgets",
+  "store_region": "EU-NORTH",
+  "metadata": {
+    "exported_at": "2024-01-15T10:00:00Z",
+    "version": 2
+  },
+  "orders": [
+    {
+      "order_id": "ORD-001",
+      "order_status": "shipped",
+      "order_date": "2024-01-10",
+      "customer": {
+        "customer_id": "CUST-42",
+        "customer_name": "Alice Korhonen",
+        "customer_email": "alice@example.com"
+      },
+      "items": [
+        { "sku": "WIDGET-A", "qty": 2, "unit_price": 29.99, "total_price": 59.98 },
+        { "sku": "GADGET-B", "qty": 1, "unit_price": 99.00, "total_price": 99.00 }
+      ],
+      "totals": {
+        "subtotal": 158.98,
+        "tax": 12.72,
+        "discount": 0.00,
+        "grand_total": 171.70
+      }
+    },
+    {
+      "order_id": "ORD-002",
+      "order_status": "processing",
+      "order_date": "2024-01-14",
+      "customer": {
+        "customer_id": "CUST-17",
+        "customer_name": "Mikko Virtanen",
+        "customer_email": "mikko@example.com"
+      },
+      "items": [
+        { "sku": "WIDGET-C", "qty": 5, "unit_price": 15.00, "total_price": 75.00 }
+      ],
+      "totals": {
+        "subtotal": 75.00,
+        "tax": 6.00,
+        "discount": 7.50,
+        "grand_total": 73.50
+      }
+    },
+    {
+      "order_id": "ORD-003",
+      "order_status": "delivered",
+      "order_date": "2024-01-08",
+      "customer": {
+        "customer_id": "CUST-09",
+        "customer_name": "Sara Mäkinen",
+        "customer_email": "sara@example.com"
+      },
+      "items": [
+        { "sku": "GADGET-A", "qty": 1, "unit_price": 149.00, "total_price": 149.00 },
+        { "sku": "WIDGET-B", "qty": 3, "unit_price": 22.50, "total_price": 67.50 }
+      ],
+      "totals": {
+        "subtotal": 216.50,
+        "tax": 17.32,
+        "discount": 21.65,
+        "grand_total": 212.17
+      }
+    }
+  ],
+  "products": [
+    { "sku": "WIDGET-A", "name": "Basic Widget",   "category": "widgets", "price": 29.99 },
+    { "sku": "WIDGET-B", "name": "Premium Widget", "category": "widgets", "price": 22.50 },
+    { "sku": "WIDGET-C", "name": "Mini Widget",    "category": "widgets", "price": 15.00 },
+    { "sku": "GADGET-A", "name": "Smart Gadget",   "category": "gadgets", "price": 149.00 },
+    { "sku": "GADGET-B", "name": "Pro Gadget",     "category": "gadgets", "price": 99.00 }
+  ]
+}

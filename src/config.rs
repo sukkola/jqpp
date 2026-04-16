@@ -1,4 +1,4 @@
-use crate::keymap::{parse_key_binding, Action, KeyBinding, Keymap};
+use crate::keymap::{Action, KeyBinding, Keymap, parse_key_binding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -71,7 +71,7 @@ pub fn load_keymap(override_path: Option<&Path>) -> (Keymap, Option<String>) {
             return (
                 Keymap::default(),
                 Some(format!("Config parse error: {}", e)),
-            )
+            );
         }
     };
 

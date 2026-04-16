@@ -1,9 +1,9 @@
 use crate::app::{App, AppState};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
-    Frame,
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::executor::Executor;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
 
     fn render(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {

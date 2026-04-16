@@ -1,0 +1,7 @@
+[tasks.demo]
+description = "Regenerate demo GIF"
+run = "cargo build --release && PATH=\"$PWD/target/release:$PATH\" vhs demo/demo.tape"
+
+[tasks.setup-hooks]
+description = "Configure git to use repo commit hooks"
+run = "git config core.hooksPath .githooks && echo 'Hooks configured.'"

@@ -1,5 +1,5 @@
 use crate::completions::CompletionItem;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -30,7 +30,10 @@ impl LspProvider {
         }
     }
 
-    pub async fn start(&mut self, msg_tx: mpsc::Sender<LspMessage>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(
+        &mut self,
+        msg_tx: mpsc::Sender<LspMessage>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let lsp_bin = std::env::var("JQPP_LSP_BIN").unwrap_or_else(|_| "jq-lsp".to_string());
         let mut child = Command::new(lsp_bin)
             .stdin(Stdio::piped())
@@ -61,7 +64,9 @@ impl LspProvider {
                     let _ = reader.read_line(&mut dummy).await;
 
                     let mut body = vec![0u8; len];
-                    if reader.read_exact(&mut body).await.is_err() { break; }
+                    if reader.read_exact(&mut body).await.is_err() {
+                        break;
+                    }
                     if let Ok(msg) = serde_json::from_slice::<Value>(&body) {
                         handle_lsp_message(msg, &reader_msg_tx, &reader_lsp_tx).await;
                     }
@@ -96,7 +101,8 @@ impl LspProvider {
                 "rootUri": null,
                 "capabilities": {}
             }
-        })).await;
+        }))
+        .await;
 
         Ok(())
     }
@@ -118,7 +124,8 @@ impl LspProvider {
                 },
                 "contentChanges": [{ "text": text }]
             }
-        })).await;
+        }))
+        .await;
     }
 
     pub async fn completion(&self, full_text: &str) {
@@ -139,7 +146,8 @@ impl LspProvider {
                 "textDocument": { "uri": "file:///completion-snippet.jq", "version": 1 },
                 "contentChanges": [{ "text": token }]
             }
-        })).await;
+        }))
+        .await;
 
         // Request completions from the snippet document at the end of the token.
         self.send(json!({
@@ -150,7 +158,8 @@ impl LspProvider {
                 "textDocument": { "uri": "file:///completion-snippet.jq" },
                 "position": { "line": 0, "character": token.len() }
             }
-        })).await;
+        }))
+        .await;
     }
 
     pub async fn shutdown(&mut self) {
@@ -158,17 +167,18 @@ impl LspProvider {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "shutdown"
-        })).await;
+        }))
+        .await;
         self.send(json!({
             "jsonrpc": "2.0",
             "method": "exit"
-        })).await;
+        }))
+        .await;
         if let Some(mut child) = self.child.take() {
             // Give the LSP process 1 s to exit gracefully, then kill it.
-            let timed_out = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                child.wait(),
-            ).await.is_err();
+            let timed_out = tokio::time::timeout(std::time::Duration::from_secs(1), child.wait())
+                .await
+                .is_err();
             if timed_out {
                 let _ = child.kill().await;
             }
@@ -188,7 +198,9 @@ async fn handle_lsp_message(
     ) {
         match method {
             "client/registerCapability" => {
-                let _ = lsp_tx.send(json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+                let _ = lsp_tx
+                    .send(json!({"jsonrpc":"2.0","id":id,"result":null}))
+                    .await;
             }
             "workspace/configuration" => {
                 // Respond with one empty config object per requested item.
@@ -197,11 +209,15 @@ async fn handle_lsp_message(
                     .map(|a| a.len())
                     .unwrap_or(1);
                 let result: Vec<Value> = (0..n).map(|_| json!({})).collect();
-                let _ = lsp_tx.send(json!({"jsonrpc":"2.0","id":id,"result":result})).await;
+                let _ = lsp_tx
+                    .send(json!({"jsonrpc":"2.0","id":id,"result":result}))
+                    .await;
             }
             _ => {
                 // Unknown server request — acknowledge with null result.
-                let _ = lsp_tx.send(json!({"jsonrpc":"2.0","id":id,"result":null})).await;
+                let _ = lsp_tx
+                    .send(json!({"jsonrpc":"2.0","id":id,"result":null}))
+                    .await;
             }
         }
         return;
@@ -225,12 +241,18 @@ async fn handle_lsp_message(
     if let Some(id) = msg.get("id") {
         if id == 1 {
             // initialize response — now send the required `initialized` notification
-            let _ = lsp_tx.send(json!({"jsonrpc":"2.0","method":"initialized","params":{}})).await;
+            let _ = lsp_tx
+                .send(json!({"jsonrpc":"2.0","method":"initialized","params":{}}))
+                .await;
             let _ = main_tx.send(LspMessage::Status("ready".to_string())).await;
         } else if id == 2 {
             // completion response
             let items = msg.get("result").and_then(|r| {
-                if r.is_array() { r.as_array() } else { r.get("items").and_then(|i| i.as_array()) }
+                if r.is_array() {
+                    r.as_array()
+                } else {
+                    r.get("items").and_then(|i| i.as_array())
+                }
             });
             let mut completions = Vec::new();
             if let Some(items) = items {
@@ -243,7 +265,10 @@ async fn handle_lsp_message(
                             .to_string();
                         completions.push(CompletionItem {
                             label: label.to_string(),
-                            detail: item.get("detail").and_then(|d| d.as_str()).map(|s| s.to_string()),
+                            detail: item
+                                .get("detail")
+                                .and_then(|d| d.as_str())
+                                .map(|s| s.to_string()),
                             insert_text,
                         });
                     }

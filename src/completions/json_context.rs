@@ -96,10 +96,13 @@ fn obj_constructor_completions(query: &str, input: &Value, out: &mut Vec<Complet
             if key.starts_with(partial_field) {
                 // `.{field}` is invalid jq — strip a bare leading dot so we produce
                 // `{field}` (or `.foo | {field}`) instead.
-                let insert_prefix = if before_brace.trim() == "." { "" } else { before_brace };
+                let insert_prefix = if before_brace.trim() == "." {
+                    ""
+                } else {
+                    before_brace
+                };
                 // insert_text replaces the whole query so Tab gives the right result.
-                let insert_text =
-                    format!("{}{{{}{}", insert_prefix, typed_before_field, key);
+                let insert_text = format!("{}{{{}{}", insert_prefix, typed_before_field, key);
                 out.push(CompletionItem {
                     label: key.clone(),
                     detail: Some("field".to_string()),
@@ -238,16 +241,28 @@ mod tests {
     fn test_top_level_completions() {
         let input = json!({"foo": 1, "bar": 2});
         let c = get_completions("", &input);
-        assert!(c.iter().any(|c| c.label == "foo" && c.insert_text == ".foo"));
-        assert!(c.iter().any(|c| c.label == "bar" && c.insert_text == ".bar"));
+        assert!(
+            c.iter()
+                .any(|c| c.label == "foo" && c.insert_text == ".foo")
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "bar" && c.insert_text == ".bar")
+        );
     }
 
     #[test]
     fn test_dot_completions() {
         let input = json!({"foo": 1, "bar": 2});
         let c = get_completions(".", &input);
-        assert!(c.iter().any(|c| c.label == "foo" && c.insert_text == ".foo"));
-        assert!(c.iter().any(|c| c.label == "bar" && c.insert_text == ".bar"));
+        assert!(
+            c.iter()
+                .any(|c| c.label == "foo" && c.insert_text == ".foo")
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "bar" && c.insert_text == ".bar")
+        );
     }
 
     #[test]
@@ -263,11 +278,17 @@ mod tests {
         let input = json!({"foo": 1, "food": 2, "bar": 3});
         let c = get_completions(".", &input);
         // only dot-path completions here (no object constructor)
-        let dot_completions: Vec<_> = c.iter().filter(|c| c.insert_text.starts_with('.')).collect();
+        let dot_completions: Vec<_> = c
+            .iter()
+            .filter(|c| c.insert_text.starts_with('.'))
+            .collect();
         assert!(dot_completions.iter().any(|c| c.label == "foo"));
         assert!(dot_completions.iter().any(|c| c.label == "food"));
-        assert!(!dot_completions.iter().any(|c| c.label == "bar"
-            && c.insert_text.starts_with(".f")));
+        assert!(
+            !dot_completions
+                .iter()
+                .any(|c| c.label == "bar" && c.insert_text.starts_with(".f"))
+        );
 
         let c2 = get_completions(".f", &input);
         assert_eq!(c2.len(), 2);
@@ -283,9 +304,16 @@ mod tests {
             "items": [{"name": "a", "value": 1}, {"name": "b", "value": 2}]
         });
         let c = get_completions(".items[].", &input);
-        assert!(c.iter().any(|c| c.label == "name" && c.insert_text == ".items[].name"),
-            "expected .items[].name, got: {:?}", c);
-        assert!(c.iter().any(|c| c.label == "value" && c.insert_text == ".items[].value"));
+        assert!(
+            c.iter()
+                .any(|c| c.label == "name" && c.insert_text == ".items[].name"),
+            "expected .items[].name, got: {:?}",
+            c
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "value" && c.insert_text == ".items[].value")
+        );
     }
 
     #[test]
@@ -294,8 +322,14 @@ mod tests {
             "items": [{"x": 1, "y": 2}]
         });
         let c = get_completions(".items[0].", &input);
-        assert!(c.iter().any(|c| c.label == "x" && c.insert_text == ".items[0].x"));
-        assert!(c.iter().any(|c| c.label == "y" && c.insert_text == ".items[0].y"));
+        assert!(
+            c.iter()
+                .any(|c| c.label == "x" && c.insert_text == ".items[0].x")
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "y" && c.insert_text == ".items[0].y")
+        );
     }
 
     // --- object constructor ---
@@ -304,7 +338,10 @@ mod tests {
     fn test_obj_constructor_empty_prefix() {
         let input = json!({"run_id": "x", "schema_version": "1"});
         let c = get_completions("{", &input);
-        assert!(c.iter().any(|c| c.label == "run_id" && c.insert_text == "{run_id"));
+        assert!(
+            c.iter()
+                .any(|c| c.label == "run_id" && c.insert_text == "{run_id")
+        );
         assert!(c.iter().any(|c| c.label == "schema_version"));
     }
 
@@ -313,8 +350,10 @@ mod tests {
         let input = json!({"run_id": "x", "input_root": "/path", "schema_version": "1"});
         let c = get_completions("{run_id, inp", &input);
         assert!(
-            c.iter().any(|c| c.label == "input_root" && c.insert_text == "{run_id, input_root"),
-            "got: {:?}", c
+            c.iter()
+                .any(|c| c.label == "input_root" && c.insert_text == "{run_id, input_root"),
+            "got: {:?}",
+            c
         );
     }
 
@@ -324,7 +363,8 @@ mod tests {
         let c = get_completions(".config | {schema", &input);
         assert!(
             c.iter().any(|c| c.label == "schema_version"),
-            "got: {:?}", c
+            "got: {:?}",
+            c
         );
     }
 
@@ -334,12 +374,24 @@ mod tests {
     fn test_array_index_open_bracket_offers_iterate_and_indices() {
         let input = json!({"items": ["a", "b", "c"]});
         let c = get_completions(".items[", &input);
-        assert!(c.iter().any(|c| c.label == "[]" && c.insert_text == ".items[]"),
-            "expected [] iterate: {:?}", c);
-        assert!(c.iter().any(|c| c.label == "[0]" && c.insert_text == ".items[0]"),
-            "expected [0]: {:?}", c);
-        assert!(c.iter().any(|c| c.label == "[2]" && c.insert_text == ".items[2]"),
-            "expected [2]: {:?}", c);
+        assert!(
+            c.iter()
+                .any(|c| c.label == "[]" && c.insert_text == ".items[]"),
+            "expected [] iterate: {:?}",
+            c
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "[0]" && c.insert_text == ".items[0]"),
+            "expected [0]: {:?}",
+            c
+        );
+        assert!(
+            c.iter()
+                .any(|c| c.label == "[2]" && c.insert_text == ".items[2]"),
+            "expected [2]: {:?}",
+            c
+        );
     }
 
     #[test]
@@ -347,10 +399,16 @@ mod tests {
         let input = json!({"x": [0,1,2,3,4,5,6,7,8,9,10,11]});
         // typing `.x[1` should only offer [1] and [10], [11]
         let c = get_completions(".x[1", &input);
-        assert!(c.iter().all(|c| c.label.starts_with("[1")),
-            "all labels must start with [1: {:?}", c);
-        assert!(!c.iter().any(|c| c.label == "[]"),
-            "[] should not appear when digit prefix typed: {:?}", c);
+        assert!(
+            c.iter().all(|c| c.label.starts_with("[1")),
+            "all labels must start with [1: {:?}",
+            c
+        );
+        assert!(
+            !c.iter().any(|c| c.label == "[]"),
+            "[] should not appear when digit prefix typed: {:?}",
+            c
+        );
     }
 
     #[test]
@@ -358,8 +416,11 @@ mod tests {
         let input = json!({"x": [1, 2]});
         let c = get_completions(".x[0]", &input);
         // completed path — no index suggestions
-        assert!(!c.iter().any(|c| c.label.starts_with('[')),
-            "no index suggestions after closing bracket: {:?}", c);
+        assert!(
+            !c.iter().any(|c| c.label.starts_with('[')),
+            "no index suggestions after closing bracket: {:?}",
+            c
+        );
     }
 
     #[test]

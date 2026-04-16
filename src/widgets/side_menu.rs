@@ -1,7 +1,7 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, List, ListItem};
-use ratatui::Frame;
 
 pub struct SideMenu {
     pub items: Vec<String>,

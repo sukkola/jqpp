@@ -1,8 +1,7 @@
 use jqpp::config;
-use jqpp::keymap::{parse_key_binding, Action, KeyBinding, Keymap};
+use jqpp::keymap::Action;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
-use std::path::Path;
 
 #[test]
 fn test_config_remap_and_action_for() {

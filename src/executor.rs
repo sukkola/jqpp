@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use jaq_core::{data, load, unwrap_valr, Compiler, Ctx, Vars};
+use jaq_core::{Compiler, Ctx, Vars, data, load, unwrap_valr};
 use jaq_json::Val;
 use num_traits::ToPrimitive;
 use serde_json::Value;
@@ -247,7 +247,7 @@ fn format_tsv(v: &Value) -> Result<String> {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Runtime error: @tsv does not support nested arrays or objects"
-                ))
+                ));
             }
         };
         fields.push(field);

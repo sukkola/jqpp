@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 use tui_textarea::TextArea;
 
 #[derive(Clone)]
@@ -148,7 +148,9 @@ impl<'a> QueryInput<'a> {
         if y >= screen.height || x >= screen.width {
             return None;
         }
-        let max_label = self.suggestions.iter()
+        let max_label = self
+            .suggestions
+            .iter()
             .map(|s| s.label.len() as u16)
             .max()
             .unwrap_or(8);
@@ -157,11 +159,18 @@ impl<'a> QueryInput<'a> {
         let width = (max_label + 2).min(available_width);
         let available_height = screen.height.saturating_sub(y);
         // +1 for the bottom border row; items fill the rest.
-        let height = (self.suggestions.len() as u16 + 1).min(12).min(available_height);
+        let height = (self.suggestions.len() as u16 + 1)
+            .min(12)
+            .min(available_height);
         if width <= 2 || height <= 1 {
             return None;
         }
-        Some(Rect { x, y, width, height })
+        Some(Rect {
+            x,
+            y,
+            width,
+            height,
+        })
     }
 }
 
@@ -170,7 +179,7 @@ impl<'a> QueryInput<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn make_qi_with_suggestions(query: &str, labels: &[&str]) -> QueryInput<'static> {
         let mut qi = QueryInput::new();
@@ -187,9 +196,19 @@ mod tests {
         qi
     }
 
-    const SCREEN: Rect = Rect { x: 0, y: 0, width: 80, height: 24 };
+    const SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
     // Query bar occupies rows 0-2 (height=3, border top/bottom + 1 content row).
-    const QUERY_AREA: Rect = Rect { x: 0, y: 0, width: 80, height: 3 };
+    const QUERY_AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 3,
+    };
 
     // ── suggestion_rect positioning ───────────────────────────────────────────
 
@@ -199,7 +218,10 @@ mod tests {
         // Dropdown must start at row 2 to cover it.
         let qi = make_qi_with_suggestions(".", &["foo"]);
         let r = qi.suggestion_rect(QUERY_AREA, SCREEN).unwrap();
-        assert_eq!(r.y, 2, "dropdown must overlap the query bar's bottom border row");
+        assert_eq!(
+            r.y, 2,
+            "dropdown must overlap the query bar's bottom border row"
+        );
     }
 
     #[test]
@@ -258,13 +280,26 @@ mod tests {
 
     #[test]
     fn dropdown_hidden_when_cursor_at_screen_edge() {
-        let narrow = Rect { x: 0, y: 0, width: 10, height: 3 };
-        let narrow_screen = Rect { x: 0, y: 0, width: 10, height: 24 };
+        let narrow = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 3,
+        };
+        let narrow_screen = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 24,
+        };
         // cursor at col 9 → x = 10 == width → no room
         let mut qi = QueryInput::new();
         qi.textarea = tui_textarea::TextArea::from(vec!["123456789".to_string()]);
         qi.textarea.move_cursor(tui_textarea::CursorMove::End);
-        qi.suggestions = vec![Suggestion { label: "x".into(), insert_text: ".x".into() }];
+        qi.suggestions = vec![Suggestion {
+            label: "x".into(),
+            insert_text: ".x".into(),
+        }];
         qi.show_suggestions = true;
         assert!(qi.suggestion_rect(narrow, narrow_screen).is_none());
     }
@@ -272,35 +307,51 @@ mod tests {
     // ── rendered output — no "Suggestions" heading ────────────────────────────
 
     fn render_suggestions(qi: &mut QueryInput, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        use ratatui::widgets::{Block, Borders, List, ListItem};
         use ratatui::style::{Color, Modifier, Style};
+        use ratatui::widgets::{Block, Borders, List, ListItem};
 
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let query_area = Rect { x: 0, y: 0, width, height: 3 };
+        let query_area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 3,
+        };
         let qi_ptr = qi as *mut QueryInput;
 
-        terminal.draw(move |frame| {
-            let qi = unsafe { &mut *qi_ptr };
-            qi.draw(frame, query_area);
-            let screen = frame.area();
-            if let Some(rect) = qi.suggestion_rect(query_area, screen) {
-                frame.render_widget(ratatui::widgets::Clear, rect);
-                let items: Vec<ListItem> = qi.suggestions.iter().enumerate().map(|(i, s)| {
-                    let style = if i == 0 {
-                        Style::default().bg(Color::Black).fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().bg(Color::Black).fg(Color::White)
-                    };
-                    ListItem::new(s.label.as_str()).style(style)
-                }).collect();
-                let mut state = ratatui::widgets::ListState::default();
-                state.select(Some(0));
-                let list = List::new(items)
-                    .block(Block::default().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM));
-                frame.render_stateful_widget(list, rect, &mut state);
-            }
-        }).unwrap();
+        terminal
+            .draw(move |frame| {
+                let qi = unsafe { &mut *qi_ptr };
+                qi.draw(frame, query_area);
+                let screen = frame.area();
+                if let Some(rect) = qi.suggestion_rect(query_area, screen) {
+                    frame.render_widget(ratatui::widgets::Clear, rect);
+                    let items: Vec<ListItem> = qi
+                        .suggestions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let style = if i == 0 {
+                                Style::default()
+                                    .bg(Color::Black)
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().bg(Color::Black).fg(Color::White)
+                            };
+                            ListItem::new(s.label.as_str()).style(style)
+                        })
+                        .collect();
+                    let mut state = ratatui::widgets::ListState::default();
+                    state.select(Some(0));
+                    let list = List::new(items).block(
+                        Block::default().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
+                    );
+                    frame.render_stateful_widget(list, rect, &mut state);
+                }
+            })
+            .unwrap();
 
         terminal.backend().buffer().clone()
     }
@@ -375,7 +426,10 @@ mod tests {
         let mut qi = make_qi_scrollable(3);
         qi.suggestion_index = 2;
         qi.clamp_scroll();
-        assert_eq!(qi.suggestion_scroll, 0, "no scrolling needed for small lists");
+        assert_eq!(
+            qi.suggestion_scroll, 0,
+            "no scrolling needed for small lists"
+        );
     }
 
     /// Items must start at x = border(1) + cursor_col + 1(left border of box).
@@ -392,7 +446,10 @@ mod tests {
         assert_eq!(left_border, "│", "left border must be at col 9, row 2");
 
         let first_char = buf.cell((10, 2)).map(|c| c.symbol()).unwrap_or(" ");
-        assert_eq!(first_char, "l", "first char of 'label_rules' must be at col 10, row 2");
+        assert_eq!(
+            first_char, "l",
+            "first char of 'label_rules' must be at col 10, row 2"
+        );
 
         // Columns left of the dropdown on the overlap row keep query bar content
         // (not blank), but column 9+ must be the suggestion box — already checked above.

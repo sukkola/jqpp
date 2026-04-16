@@ -1,20 +1,23 @@
 use jqpp::app::{App, AppState};
-use jqpp::executor::Executor;
+use jqpp::completions;
 use jqpp::completions::lsp::{LspMessage, LspProvider};
-use jqpp::keymap;
 use jqpp::config;
+use jqpp::executor::Executor;
+use jqpp::keymap;
 use jqpp::ui;
 use jqpp::widgets;
-use jqpp::completions;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, DisableMouseCapture, EnableMouseCapture, EnableFocusChange, EnableBracketedPaste, DisableBracketedPaste};
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::crossterm::cursor::{Hide, Show};
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, Read, IsTerminal, Write};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
+    EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -44,8 +47,12 @@ struct Args {
 
 struct TtyWriter(std::fs::File);
 impl Write for TtyWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
-    fn flush(&mut self) -> io::Result<()> { self.0.flush() }
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
 }
 
 struct TerminalGuard {
@@ -54,20 +61,35 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn create(tty: Option<&std::fs::File>) -> Result<Self> {
-        ratatui::crossterm::terminal::enable_raw_mode()
-            .context("Failed to enable raw mode")?;
+        ratatui::crossterm::terminal::enable_raw_mode().context("Failed to enable raw mode")?;
 
         let tty_clone = tty.and_then(|t| t.try_clone().ok());
 
         let setup_result = if let Some(tty_handle) = tty {
             let mut writer = TtyWriter(
-                tty_handle.try_clone().context("Failed to clone TTY handle for writer")?,
+                tty_handle
+                    .try_clone()
+                    .context("Failed to clone TTY handle for writer")?,
             );
-            execute!(writer, EnterAlternateScreen, EnableMouseCapture, EnableFocusChange, EnableBracketedPaste, Hide)
-                .context("Failed to setup TTY terminal state")
+            execute!(
+                writer,
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                EnableFocusChange,
+                EnableBracketedPaste,
+                Hide
+            )
+            .context("Failed to setup TTY terminal state")
         } else {
-            execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableFocusChange, EnableBracketedPaste, Hide)
-                .context("Failed to initialize terminal state")
+            execute!(
+                io::stdout(),
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                EnableFocusChange,
+                EnableBracketedPaste,
+                Hide
+            )
+            .context("Failed to initialize terminal state")
         };
 
         if let Err(e) = setup_result {
@@ -75,7 +97,9 @@ impl TerminalGuard {
             return Err(e);
         }
 
-        Ok(Self { tty_handle: tty_clone })
+        Ok(Self {
+            tty_handle: tty_clone,
+        })
     }
 }
 
@@ -83,25 +107,47 @@ impl Drop for TerminalGuard {
     #[allow(clippy::collapsible_if)]
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        
+
         if let Some(ref tty) = self.tty_handle {
             if let Ok(cloned) = tty.try_clone() {
                 let mut writer = TtyWriter(cloned);
-                let _ = execute!(writer, DisableBracketedPaste, LeaveAlternateScreen, DisableMouseCapture, Show);
+                let _ = execute!(
+                    writer,
+                    DisableBracketedPaste,
+                    LeaveAlternateScreen,
+                    DisableMouseCapture,
+                    Show
+                );
                 return;
             }
         }
 
         #[cfg(unix)]
         {
-            if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+            if let Ok(tty) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+            {
                 let mut writer = TtyWriter(tty);
-                let _ = execute!(writer, DisableBracketedPaste, LeaveAlternateScreen, DisableMouseCapture, Show);
+                let _ = execute!(
+                    writer,
+                    DisableBracketedPaste,
+                    LeaveAlternateScreen,
+                    DisableMouseCapture,
+                    Show
+                );
                 return;
             }
         }
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen, DisableMouseCapture, Show);
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
     }
 }
 
@@ -111,15 +157,29 @@ fn setup_panic_hook(debug: bool) {
         let _ = disable_raw_mode();
         #[cfg(unix)]
         {
-            if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+            if let Ok(tty) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+            {
                 let mut writer = TtyWriter(tty);
                 let _ = execute!(writer, LeaveAlternateScreen, DisableMouseCapture, Show);
             } else {
-                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
+                let _ = execute!(
+                    io::stdout(),
+                    LeaveAlternateScreen,
+                    DisableMouseCapture,
+                    Show
+                );
             }
         }
         #[cfg(not(unix))]
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            Show
+        );
 
         if debug {
             original_panic_hook(panic_info);
@@ -136,7 +196,7 @@ fn main() {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
-    
+
     if let Err(e) = actual_main(args) {
         if std::env::var("RUST_BACKTRACE").is_ok() {
             eprintln!("jqpp CRITICAL ERROR: {:?}", e);
@@ -151,16 +211,26 @@ fn main() {
 fn get_tty_handle() -> Option<std::fs::File> {
     #[cfg(unix)]
     {
-        if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+        if let Ok(tty) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
             return Some(tty);
         }
-        
+
         for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO, libc::STDIN_FILENO] {
             if unsafe { libc::isatty(fd) } != 0 {
                 let ptr = unsafe { libc::ttyname(fd) };
                 if !ptr.is_null() {
-                    let path = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().to_string();
-                    if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+                    let path = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                        .to_string_lossy()
+                        .to_string();
+                    if let Ok(tty) = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                    {
                         return Some(tty);
                     }
                 }
@@ -172,20 +242,24 @@ fn get_tty_handle() -> Option<std::fs::File> {
 
 fn actual_main(args: Args) -> Result<()> {
     setup_panic_hook(args.debug);
-    
+
     let mut input_data = Vec::new();
     let stdin_is_terminal = io::stdin().is_terminal();
-    
+
     if let Some(ref f_path) = args.file {
         input_data = std::fs::read(f_path).context(format!("Failed to read file: {:?}", f_path))?;
     } else if !stdin_is_terminal {
-        io::stdin().read_to_end(&mut input_data).context("Failed to read from stdin pipe")?;
+        io::stdin()
+            .read_to_end(&mut input_data)
+            .context("Failed to read from stdin pipe")?;
     }
 
     let tty_handle = get_tty_handle();
 
     use std::os::unix::io::AsRawFd;
-    if let Some(ref tty) = tty_handle && !stdin_is_terminal {
+    if let Some(ref tty) = tty_handle
+        && !stdin_is_terminal
+    {
         unsafe {
             if libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) == -1 {
                 return Err(anyhow::anyhow!("Failed to redirect TTY to stdin"));
@@ -194,16 +268,22 @@ fn actual_main(args: Args) -> Result<()> {
     }
 
     if !stdin_is_terminal && tty_handle.is_none() && std::env::var("JQPP_SKIP_TTY_CHECK").is_err() {
-        return Err(anyhow::anyhow!("No TTY found for interactive mode while stdin is redirected."));
+        return Err(anyhow::anyhow!(
+            "No TTY found for interactive mode while stdin is redirected."
+        ));
     }
 
     let executor = if !input_data.is_empty() {
-        let json_input: serde_json::Value = serde_json::from_slice(&input_data)
-            .context("Failed to parse input as JSON")?;
+        let json_input: serde_json::Value =
+            serde_json::from_slice(&input_data).context("Failed to parse input as JSON")?;
         Some(Executor {
             raw_input: input_data,
             json_input,
-            source_label: args.file.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "stdin".to_string()),
+            source_label: args
+                .file
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "stdin".to_string()),
         })
     } else {
         None
@@ -235,6 +315,20 @@ async fn run(
     keymap: keymap::Keymap,
     config_error: Option<String>,
 ) -> Result<()> {
+    // Headless mode: used by integration tests. Start LSP if requested but
+    // never touch the terminal — no raw mode, no alternate screen.
+    if std::env::var("JQPP_SKIP_TTY_CHECK").is_ok() {
+        if args.lsp {
+            let (lsp_tx, _lsp_rx) = mpsc::channel::<LspMessage>(100);
+            let mut provider = LspProvider::new();
+            let _ = provider.start(lsp_tx).await;
+            // Park until the test kills us.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let _ = provider.shutdown().await;
+        }
+        return Ok(());
+    }
+
     let mut app = App::new();
     app.lsp_enabled = args.lsp;
     app.executor = executor;
@@ -257,8 +351,13 @@ async fn run(
         None
     };
 
-    let _guard = TerminalGuard::create(tty_handle.as_ref().and_then(|f| f.try_clone().ok()).as_ref())?;
-    
+    let _guard = TerminalGuard::create(
+        tty_handle
+            .as_ref()
+            .and_then(|f| f.try_clone().ok())
+            .as_ref(),
+    )?;
+
     match tty_handle {
         Some(tty) => {
             let backend = CrosstermBackend::new(TtyWriter(tty));
@@ -285,28 +384,36 @@ async fn main_loop<B: ratatui::backend::Backend>(
     let mut debounce_pending = false;
 
     let mut key_log: Option<std::fs::File> = std::env::var("JQPP_KEY_LOG").ok().and_then(|path| {
-        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
     });
 
     if let Some(ref exec) = app.executor {
         let input = exec.json_input.clone();
-        if let Ok(Ok(results)) = tokio::task::spawn_blocking(move || {
-            Executor::execute(".", &input)
-        }).await {
+        if let Ok(Ok(results)) =
+            tokio::task::spawn_blocking(move || Executor::execute(".", &input)).await
+        {
             app.results = results;
         }
     }
 
-    let mut footer_message: Option<(String, Instant)> = if let (Some(m), Some(at)) = (app.footer_message.take(), app.footer_message_at.take()) {
-        Some((m, at))
-    } else {
-        None
-    };
+    let mut footer_message: Option<(String, Instant)> =
+        if let (Some(m), Some(at)) = (app.footer_message.take(), app.footer_message_at.take()) {
+            Some((m, at))
+        } else {
+            None
+        };
     let mut lsp_completions: Vec<completions::CompletionItem> = Vec::new();
     let mut suggestion_active = false;
     let mut cached_pipe_type: Option<String> = None;
     let mut last_esc_at: Option<Instant> = None;
-    type ComputeResult = (anyhow::Result<(Vec<serde_json::Value>, bool)>, Option<String>);
+    type ComputeResult = (
+        anyhow::Result<(Vec<serde_json::Value>, bool)>,
+        Option<String>,
+    );
     let mut compute_handle: Option<tokio::task::JoinHandle<ComputeResult>> = None;
     let mut pending_qp: String = String::new();
 
@@ -337,7 +444,11 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     app.query_input.suggestion_index = 0;
                     app.query_input.suggestion_scroll = 0;
                     let all_exact = !app.query_input.suggestions.is_empty()
-                        && app.query_input.suggestions.iter().all(|s| s.insert_text == pending_qp);
+                        && app
+                            .query_input
+                            .suggestions
+                            .iter()
+                            .all(|s| s.insert_text == pending_qp);
                     if all_exact {
                         app.query_input.show_suggestions = false;
                         suggestion_active = false;
@@ -350,7 +461,9 @@ async fn main_loop<B: ratatui::backend::Backend>(
             }
         }
 
-        terminal.draw(|f| ui::draw(f, app, keymap)).context("Failed to draw TUI frame")?;
+        terminal
+            .draw(|f| ui::draw(f, app, keymap))
+            .context("Failed to draw TUI frame")?;
 
         while let Ok(msg) = lsp_rx.try_recv() {
             match msg {
@@ -377,14 +490,19 @@ async fn main_loop<B: ratatui::backend::Backend>(
                         app.query_input.suggestion_index = 0;
                         app.query_input.suggestion_scroll = 0;
                         let all_exact = !app.query_input.suggestions.is_empty()
-                            && app.query_input.suggestions.iter().all(|s| s.insert_text == query_prefix);
+                            && app
+                                .query_input
+                                .suggestions
+                                .iter()
+                                .all(|s| s.insert_text == query_prefix);
                         if all_exact {
                             app.query_input.show_suggestions = false;
                             suggestion_active = false;
                             lsp_completions.clear();
                             cached_pipe_type = None;
                         } else {
-                            app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                            app.query_input.show_suggestions =
+                                !app.query_input.suggestions.is_empty();
                         }
                     }
                 }
@@ -398,7 +516,11 @@ async fn main_loop<B: ratatui::backend::Backend>(
                 }
                 Event::Key(key) => {
                     if let Some(ref mut log) = key_log {
-                        let _ = writeln!(&*log, "key: {:?} mods: {:?} kind: {:?}", key.code, key.modifiers, key.kind);
+                        let _ = writeln!(
+                            &*log,
+                            "key: {:?} mods: {:?} kind: {:?}",
+                            key.code, key.modifiers, key.kind
+                        );
                     }
 
                     let is_action = |a: keymap::Action| keymap.is_action(a, &key);
@@ -407,7 +529,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                         || (key.modifiers.contains(KeyModifiers::CONTROL)
                             && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')));
                     let is_pane_quit = !matches!(app.state, AppState::QueryInput)
-                        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) || key.code == KeyCode::Esc);
+                        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+                            || key.code == KeyCode::Esc);
 
                     if is_ctrl_quit || is_pane_quit {
                         app.running = false;
@@ -415,11 +538,17 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     }
 
                     let is_copy = is_action(keymap::Action::CopyClipboard)
-                        || (key.modifiers.contains(KeyModifiers::SUPER) && key.code == KeyCode::Char('c'));
+                        || (key.modifiers.contains(KeyModifiers::SUPER)
+                            && key.code == KeyCode::Char('c'));
                     if is_copy {
                         let text = match app.state {
-                            AppState::QueryInput => Some(app.query_input.textarea.lines()[0].clone()),
-                            AppState::LeftPane => app.executor.as_ref().map(|e| String::from_utf8_lossy(&e.raw_input).into_owned()),
+                            AppState::QueryInput => {
+                                Some(app.query_input.textarea.lines()[0].clone())
+                            }
+                            AppState::LeftPane => app
+                                .executor
+                                .as_ref()
+                                .map(|e| String::from_utf8_lossy(&e.raw_input).into_owned()),
                             AppState::RightPane => {
                                 if let Some(ref err) = app.error {
                                     Some(err.clone())
@@ -443,24 +572,35 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     match app.state {
                         AppState::QueryInput => {
                             if is_action(keymap::Action::Submit) {
-                                if app.query_input.show_suggestions && !app.query_input.suggestions.is_empty() {
-                                    let suggestion = app.query_input.suggestions[app.query_input.suggestion_index].insert_text.clone();
+                                if app.query_input.show_suggestions
+                                    && !app.query_input.suggestions.is_empty()
+                                {
+                                    let suggestion = app.query_input.suggestions
+                                        [app.query_input.suggestion_index]
+                                        .insert_text
+                                        .clone();
                                     let cur = app.query_input.textarea.cursor().1;
                                     let full = app.query_input.textarea.lines()[0].clone();
                                     let suffix: String = full.chars().skip(cur).collect();
                                     let new_text = format!("{}{}", suggestion, suffix);
                                     let col = cursor_col_after_accept(&suggestion);
-                                    app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
+                                    app.query_input.textarea =
+                                        tui_textarea::TextArea::from(vec![new_text]);
                                     app.query_input.textarea.set_block(
                                         ratatui::widgets::Block::default()
                                             .title(" Query ")
                                             .borders(ratatui::widgets::Borders::ALL),
                                     );
-                                    app.query_input.textarea.set_cursor_line_style(ratatui::style::Style::default());
-                                    app.query_input.textarea.move_cursor(tui_textarea::CursorMove::Jump(0, col));
+                                    app.query_input
+                                        .textarea
+                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                    app.query_input
+                                        .textarea
+                                        .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                     app.query_input.show_suggestions = false;
                                     suggestion_active = false;
-                                    lsp_completions.clear(); cached_pipe_type = None;
+                                    lsp_completions.clear();
+                                    cached_pipe_type = None;
                                     last_edit_at = Instant::now() - debounce_duration;
                                     debounce_pending = true;
                                 } else {
@@ -470,8 +610,16 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                     app.query_input.push_history(query.clone());
                                     if let Some(ref exec) = app.executor {
                                         match Executor::execute_query(&query, &exec.json_input) {
-                                            Ok((results, raw)) => { app.results = results; app.error = None; app.raw_output = raw; }
-                                            Err(e) => { app.error = Some(e.to_string()); app.results = Vec::new(); app.raw_output = false; }
+                                            Ok((results, raw)) => {
+                                                app.results = results;
+                                                app.error = None;
+                                                app.raw_output = raw;
+                                            }
+                                            Err(e) => {
+                                                app.error = Some(e.to_string());
+                                                app.results = Vec::new();
+                                                app.raw_output = false;
+                                            }
                                         }
                                     }
                                 }
@@ -480,25 +628,39 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 if std::fs::write("jqpp-output.json", output).is_ok() {
                                     footer_message = Some(("saved".to_string(), Instant::now()));
                                 }
-                            } else if is_action(keymap::Action::AcceptSuggestion) || is_action(keymap::Action::NextPane) {
-                                if app.query_input.show_suggestions && !app.query_input.suggestions.is_empty() && is_action(keymap::Action::AcceptSuggestion) {
-                                    let suggestion = app.query_input.suggestions[app.query_input.suggestion_index].insert_text.clone();
+                            } else if is_action(keymap::Action::AcceptSuggestion)
+                                || is_action(keymap::Action::NextPane)
+                            {
+                                if app.query_input.show_suggestions
+                                    && !app.query_input.suggestions.is_empty()
+                                    && is_action(keymap::Action::AcceptSuggestion)
+                                {
+                                    let suggestion = app.query_input.suggestions
+                                        [app.query_input.suggestion_index]
+                                        .insert_text
+                                        .clone();
                                     let cur = app.query_input.textarea.cursor().1;
                                     let full = app.query_input.textarea.lines()[0].clone();
                                     let suffix: String = full.chars().skip(cur).collect();
                                     let new_text = format!("{}{}", suggestion, suffix);
                                     let col = cursor_col_after_accept(&suggestion);
-                                    app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
+                                    app.query_input.textarea =
+                                        tui_textarea::TextArea::from(vec![new_text]);
                                     app.query_input.textarea.set_block(
                                         ratatui::widgets::Block::default()
                                             .title(" Query ")
                                             .borders(ratatui::widgets::Borders::ALL),
                                     );
-                                    app.query_input.textarea.set_cursor_line_style(ratatui::style::Style::default());
-                                    app.query_input.textarea.move_cursor(tui_textarea::CursorMove::Jump(0, col));
+                                    app.query_input
+                                        .textarea
+                                        .set_cursor_line_style(ratatui::style::Style::default());
+                                    app.query_input
+                                        .textarea
+                                        .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                     app.query_input.show_suggestions = false;
                                     suggestion_active = false;
-                                    lsp_completions.clear(); cached_pipe_type = None;
+                                    lsp_completions.clear();
+                                    cached_pipe_type = None;
                                     last_edit_at = Instant::now() - debounce_duration;
                                     debounce_pending = true;
                                 } else if is_action(keymap::Action::NextPane) {
@@ -508,18 +670,24 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 app.query_input.show_suggestions = false;
                                 suggestion_active = false;
                                 app.prev_pane();
-                            } else if is_action(keymap::Action::SuggestionUp) || is_action(keymap::Action::HistoryUp) {
-                                if app.query_input.show_suggestions && is_action(keymap::Action::SuggestionUp) {
+                            } else if is_action(keymap::Action::SuggestionUp)
+                                || is_action(keymap::Action::HistoryUp)
+                            {
+                                if app.query_input.show_suggestions
+                                    && is_action(keymap::Action::SuggestionUp)
+                                {
                                     if app.query_input.suggestion_index > 0 {
                                         app.query_input.suggestion_index -= 1;
                                         app.query_input.clamp_scroll();
                                     } else {
                                         app.query_input.show_suggestions = false;
                                         suggestion_active = false;
-                                        lsp_completions.clear(); cached_pipe_type = None;
+                                        lsp_completions.clear();
+                                        cached_pipe_type = None;
                                     }
                                 } else if is_action(keymap::Action::HistoryUp) {
-                                    if suggestion_active && !app.query_input.suggestions.is_empty() {
+                                    if suggestion_active && !app.query_input.suggestions.is_empty()
+                                    {
                                         app.query_input.show_suggestions = true;
                                         app.query_input.suggestion_index =
                                             app.query_input.suggestions.len().saturating_sub(1);
@@ -528,13 +696,21 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         app.query_input.history_up();
                                     }
                                 }
-                            } else if is_action(keymap::Action::SuggestionDown) || is_action(keymap::Action::HistoryDown) {
-                                if app.query_input.show_suggestions && is_action(keymap::Action::SuggestionDown) {
-                                    if app.query_input.suggestion_index + 1 < app.query_input.suggestions.len() {
+                            } else if is_action(keymap::Action::SuggestionDown)
+                                || is_action(keymap::Action::HistoryDown)
+                            {
+                                if app.query_input.show_suggestions
+                                    && is_action(keymap::Action::SuggestionDown)
+                                {
+                                    if app.query_input.suggestion_index + 1
+                                        < app.query_input.suggestions.len()
+                                    {
                                         app.query_input.suggestion_index += 1;
                                         app.query_input.clamp_scroll();
                                     }
-                                } else if is_action(keymap::Action::HistoryDown) || is_action(keymap::Action::SuggestionDown) {
+                                } else if is_action(keymap::Action::HistoryDown)
+                                    || is_action(keymap::Action::SuggestionDown)
+                                {
                                     suggestion_active = true;
                                     if !app.query_input.suggestions.is_empty() {
                                         app.query_input.show_suggestions = true;
@@ -549,7 +725,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 if app.query_input.show_suggestions {
                                     app.query_input.show_suggestions = false;
                                     suggestion_active = false;
-                                    lsp_completions.clear(); cached_pipe_type = None;
+                                    lsp_completions.clear();
+                                    cached_pipe_type = None;
                                     last_esc_at = Some(Instant::now());
                                 } else if last_esc_at
                                     .map(|t| t.elapsed() < Duration::from_millis(500))
@@ -565,7 +742,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                     app.query_input.textarea = new_ta;
                                     app.query_input.show_suggestions = false;
                                     suggestion_active = false;
-                                    lsp_completions.clear(); cached_pipe_type = None;
+                                    lsp_completions.clear();
+                                    cached_pipe_type = None;
                                     last_esc_at = None;
                                     last_edit_at = Instant::now() - debounce_duration;
                                     debounce_pending = true;
@@ -579,21 +757,28 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 }
                             } else if is_action(keymap::Action::ToggleMenu) {
                                 app.side_menu.visible = !app.side_menu.visible;
-                                if app.side_menu.visible { app.state = AppState::SideMenu; }
-                                else if matches!(app.state, AppState::SideMenu) { app.state = AppState::QueryInput; }
+                                if app.side_menu.visible {
+                                    app.state = AppState::SideMenu;
+                                } else if matches!(app.state, AppState::SideMenu) {
+                                    app.state = AppState::QueryInput;
+                                }
                             } else if app.query_input.textarea.input(key) {
                                 last_edit_at = Instant::now();
                                 debounce_pending = true;
                                 match key.code {
-                                    KeyCode::Char('.') | KeyCode::Char('|')
-                                    | KeyCode::Char('{') | KeyCode::Char('[')
-                                    | KeyCode::Char(',') | KeyCode::Char('@') => {
+                                    KeyCode::Char('.')
+                                    | KeyCode::Char('|')
+                                    | KeyCode::Char('{')
+                                    | KeyCode::Char('[')
+                                    | KeyCode::Char(',')
+                                    | KeyCode::Char('@') => {
                                         suggestion_active = true;
                                     }
                                     KeyCode::Char(c)
-                                        if c.is_alphanumeric() || c == '_' || c == '-' || c == ' ' =>
-                                    {
-                                    }
+                                        if c.is_alphanumeric()
+                                            || c == '_'
+                                            || c == '-'
+                                            || c == ' ' => {}
                                     KeyCode::Backspace | KeyCode::Delete => {
                                         suggestion_active = true;
                                     }
@@ -610,11 +795,17 @@ async fn main_loop<B: ratatui::backend::Backend>(
                             } else if is_action(keymap::Action::PrevPane) {
                                 app.prev_pane();
                             } else if is_action(keymap::Action::SuggestionUp) {
-                                if app.side_menu.selected > 0 { app.side_menu.selected -= 1; }
-                                else { app.side_menu.selected = app.side_menu.items.len() - 1; }
+                                if app.side_menu.selected > 0 {
+                                    app.side_menu.selected -= 1;
+                                } else {
+                                    app.side_menu.selected = app.side_menu.items.len() - 1;
+                                }
                             } else if is_action(keymap::Action::SuggestionDown) {
-                                if app.side_menu.selected + 1 < app.side_menu.items.len() { app.side_menu.selected += 1; }
-                                else { app.side_menu.selected = 0; }
+                                if app.side_menu.selected + 1 < app.side_menu.items.len() {
+                                    app.side_menu.selected += 1;
+                                } else {
+                                    app.side_menu.selected = 0;
+                                }
                             } else if is_action(keymap::Action::ToggleMenu) {
                                 app.side_menu.visible = false;
                                 app.state = AppState::QueryInput;
@@ -626,19 +817,29 @@ async fn main_loop<B: ratatui::backend::Backend>(
                             } else if is_action(keymap::Action::PrevPane) {
                                 app.prev_pane();
                             } else if is_action(keymap::Action::ScrollDown) {
-                                if matches!(app.state, AppState::LeftPane) { app.left_scroll += 1; }
-                                else { app.right_scroll += 1; }
+                                if matches!(app.state, AppState::LeftPane) {
+                                    app.left_scroll += 1;
+                                } else {
+                                    app.right_scroll += 1;
+                                }
                             } else if is_action(keymap::Action::ScrollUp) {
-                                if matches!(app.state, AppState::LeftPane) { app.left_scroll = app.left_scroll.saturating_sub(1); }
-                                else { app.right_scroll = app.right_scroll.saturating_sub(1); }
+                                if matches!(app.state, AppState::LeftPane) {
+                                    app.left_scroll = app.left_scroll.saturating_sub(1);
+                                } else {
+                                    app.right_scroll = app.right_scroll.saturating_sub(1);
+                                }
                             } else if is_action(keymap::Action::ToggleQueryBar) {
                                 app.query_bar_visible = !app.query_bar_visible;
-                                if !app.query_bar_visible && matches!(app.state, AppState::QueryInput) {
+                                if !app.query_bar_visible
+                                    && matches!(app.state, AppState::QueryInput)
+                                {
                                     app.state = AppState::LeftPane;
                                 }
                             } else if is_action(keymap::Action::ToggleMenu) {
                                 app.side_menu.visible = !app.side_menu.visible;
-                                if app.side_menu.visible { app.state = AppState::SideMenu; }
+                                if app.side_menu.visible {
+                                    app.state = AppState::SideMenu;
+                                }
                             }
                         }
                     }
@@ -656,19 +857,23 @@ async fn main_loop<B: ratatui::backend::Backend>(
                         debounce_pending = true;
                     }
                 }
-                Event::Mouse(mouse) => {
-                    match mouse.kind {
-                        MouseEventKind::ScrollDown => {
-                            if matches!(app.state, AppState::LeftPane) { app.left_scroll += 1; }
-                            else if matches!(app.state, AppState::RightPane) { app.right_scroll += 1; }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        if matches!(app.state, AppState::LeftPane) {
+                            app.left_scroll += 1;
+                        } else if matches!(app.state, AppState::RightPane) {
+                            app.right_scroll += 1;
                         }
-                        MouseEventKind::ScrollUp => {
-                            if matches!(app.state, AppState::LeftPane) { app.left_scroll = app.left_scroll.saturating_sub(1); }
-                            else if matches!(app.state, AppState::RightPane) { app.right_scroll = app.right_scroll.saturating_sub(1); }
-                        }
-                        _ => {}
                     }
-                }
+                    MouseEventKind::ScrollUp => {
+                        if matches!(app.state, AppState::LeftPane) {
+                            app.left_scroll = app.left_scroll.saturating_sub(1);
+                        } else if matches!(app.state, AppState::RightPane) {
+                            app.right_scroll = app.right_scroll.saturating_sub(1);
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -678,9 +883,16 @@ async fn main_loop<B: ratatui::backend::Backend>(
             let query = app.query_input.textarea.lines()[0].clone();
             let cursor_col = app.query_input.textarea.cursor().1;
             let query_prefix: String = query.chars().take(cursor_col).collect();
-            let effective_query = if query.trim().is_empty() { ".".to_string() } else { query.clone() };
+            let effective_query = if query.trim().is_empty() {
+                ".".to_string()
+            } else {
+                query.clone()
+            };
 
             if let Some(ref exec) = app.executor {
+                if query_prefix.rfind('|').is_none() {
+                    cached_pipe_type = None;
+                }
                 let eq = effective_query.clone();
                 let q = query_prefix.clone();
                 let input = exec.json_input.clone();
@@ -691,10 +903,18 @@ async fn main_loop<B: ratatui::backend::Backend>(
                         .unwrap_or_else(|| q.clone());
                     let pipe_type = type_query.rfind('|').and_then(|p| {
                         let prefix = type_query[..p].trim();
-                        if prefix.is_empty() { return None; }
+                        if prefix.is_empty() {
+                            return None;
+                        }
                         Executor::execute(prefix, &input)
                             .ok()
-                            .and_then(|mut r| if r.is_empty() { None } else { Some(r.swap_remove(0)) })
+                            .and_then(|mut r| {
+                                if r.is_empty() {
+                                    None
+                                } else {
+                                    Some(r.swap_remove(0))
+                                }
+                            })
                             .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
                     });
                     (main_result, pipe_type)
@@ -711,7 +931,11 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     app.query_input.suggestion_index = 0;
                     app.query_input.suggestion_scroll = 0;
                     let all_exact = !app.query_input.suggestions.is_empty()
-                        && app.query_input.suggestions.iter().all(|s| s.insert_text == query_prefix);
+                        && app
+                            .query_input
+                            .suggestions
+                            .iter()
+                            .all(|s| s.insert_text == query_prefix);
                     if all_exact {
                         app.query_input.show_suggestions = false;
                         suggestion_active = false;
@@ -735,7 +959,11 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     app.query_input.suggestion_index = 0;
                     app.query_input.suggestion_scroll = 0;
                     let all_exact = !app.query_input.suggestions.is_empty()
-                        && app.query_input.suggestions.iter().all(|s| s.insert_text == query_prefix);
+                        && app
+                            .query_input
+                            .suggestions
+                            .iter()
+                            .all(|s| s.insert_text == query_prefix);
                     if all_exact {
                         app.query_input.show_suggestions = false;
                         suggestion_active = false;
@@ -758,7 +986,9 @@ async fn main_loop<B: ratatui::backend::Backend>(
 
         if let Some((ref msg, start)) = footer_message {
             let timeout = if msg.starts_with("Config") { 5 } else { 2 };
-            if start.elapsed() >= Duration::from_secs(timeout) { footer_message = None; }
+            if start.elapsed() >= Duration::from_secs(timeout) {
+                footer_message = None;
+            }
         }
         app.footer_message = footer_message.as_ref().map(|(m, _)| m.clone());
     }
@@ -795,29 +1025,39 @@ fn compute_suggestions(
             .collect()
     };
 
-    let lsp_patched: Vec<completions::CompletionItem> = build_lsp_suggestions(lsp_completions, token, prefix);
+    let lsp_patched: Vec<completions::CompletionItem> =
+        build_lsp_suggestions(lsp_completions, token, prefix);
 
     let mut merged = json_completions;
     for item in builtin_completions {
-        if !merged.iter().any(|i: &completions::CompletionItem| i.label == item.label) {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.label == item.label)
+        {
             merged.push(item);
         }
     }
     for item in lsp_patched {
-        if !merged.iter().any(|i: &completions::CompletionItem| i.label == item.label) {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.label == item.label)
+        {
             merged.push(item);
         }
     }
 
     merged
         .into_iter()
-        .map(|i| widgets::query_input::Suggestion { label: i.label, insert_text: i.insert_text })
+        .map(|i| widgets::query_input::Suggestion {
+            label: i.label,
+            insert_text: i.insert_text,
+        })
         .collect()
 }
 
 fn current_token(query: &str) -> &str {
     if let Some(p) = query.rfind('|') {
-        query[p+1..].trim_start()
+        query[p + 1..].trim_start()
     } else {
         query
     }
@@ -825,7 +1065,7 @@ fn current_token(query: &str) -> &str {
 
 fn lsp_pipe_prefix(query: &str) -> &str {
     if let Some(p) = query.rfind('|') {
-        &query[..p+1]
+        &query[..p + 1]
     } else {
         ""
     }
@@ -836,7 +1076,8 @@ fn build_lsp_suggestions(
     token: &str,
     prefix: &str,
 ) -> Vec<completions::CompletionItem> {
-    cache.iter()
+    cache
+        .iter()
         .filter(|c| c.label.starts_with(token))
         .map(|c| completions::CompletionItem {
             insert_text: format!("{}{}", prefix, c.insert_text),

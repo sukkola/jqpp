@@ -33,4 +33,4 @@ path = "src/main.rs"
 
 [[bin]]
 name = "mock_lsp"
-path = "tests/mock_lsp.rs"
+path = "tests/helpers/mock_lsp.rs"

@@ -15,6 +15,7 @@ use std::time::Duration;
 fn run_piped(input: &[u8], extra_args: &[&str], timeout: Duration) -> (Vec<u8>, Vec<u8>) {
     let mut child = Command::new("target/debug/jqpp")
         .args(extra_args)
+        .env("JQPP_SKIP_TTY_CHECK", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
