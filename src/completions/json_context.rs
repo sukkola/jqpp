@@ -212,14 +212,13 @@ fn find_value_at_path<'a>(input: &'a Value, path: &str) -> Option<&'a Value> {
                     current = next;
                 }
             }
-            Value::Array(arr) => {
+            Value::Array(arr)
                 // Already inside an array; `[]` or `[n]` descends into first element.
-                if is_array_access || key.is_empty() {
-                    current = arr.first()?;
-                } else {
-                    return None;
-                }
+                if (is_array_access || key.is_empty()) =>
+            {
+                current = arr.first()?;
             }
+            Value::Array(_) => return None,
             _ => return None,
         }
     }
