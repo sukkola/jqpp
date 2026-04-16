@@ -18,6 +18,8 @@ arboard = "3.4.1"
 num-traits = "0.2.19"
 libc = "0.2"
 anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = { version = "0.8", features = ["parse"] }
 signal-hook = "0.3"
 
 [dev-dependencies]

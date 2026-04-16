@@ -48,6 +48,47 @@ jqt data.json --lsp
 | `q` | Quit (when focus is not on query input) |
 | `Ctrl+C` | Quit from any state |
 
+## Configuration
+
+`jqt` can be configured via a TOML file. By default, it looks for a file at:
+- Linux/macOS: `~/.config/jqt/config.toml` (or `$XDG_CONFIG_HOME/jqt/config.toml`)
+
+### Example `config.toml`
+
+```toml
+[keys]
+quit = "F10"
+copy-clipboard = "Ctrl+C"
+save-output = "Ctrl+S"
+next-pane = "Ctrl+Right"
+prev-pane = "Ctrl+Left"
+```
+
+### Remappable Actions
+
+| Action Name | Default |
+|---|---|
+| `submit` | `Enter` |
+| `accept-suggestion` | `Tab` |
+| `next-pane` | `Tab` |
+| `prev-pane` | `BackTab` |
+| `quit` | `Ctrl+C` |
+| `copy-clipboard` | `Ctrl+Y` |
+| `save-output` | `Ctrl+S` |
+| `toggle-query-bar` | `Ctrl+T` |
+| `toggle-menu` | `Ctrl+M` |
+| `history-up` | `Up` |
+| `history-down` | `Down` |
+| `suggestion-up` | `Up` |
+| `suggestion-down` | `Down` |
+| `scroll-up` | `k` |
+| `scroll-down` | `j` |
+
+### CLI Options
+
+- `--config <path>`: Override the default config file location.
+- `--print-config`: Print the effective configuration (including defaults) to stdout and exit. Use this to generate a base for your custom config.
+
 ## Completions
 
 Suggestions appear after typing `.`, `|`, `{`, `[`, `,`, or `@`. They also update as you continue typing a prefix. The dropdown shows up to 11 items at a time and scrolls as you navigate.

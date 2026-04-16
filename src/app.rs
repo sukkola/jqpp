@@ -21,6 +21,7 @@ pub struct App<'a> {
     pub query_input: QueryInput<'a>,
     pub side_menu: SideMenu,
     pub footer_message: Option<String>,
+    pub footer_message_at: Option<std::time::Instant>,
     pub lsp_status: Option<String>,
     pub lsp_diagnostic: Option<String>,
     pub lsp_enabled: bool,
@@ -47,6 +48,7 @@ impl<'a> App<'a> {
             query_input: QueryInput::new(),
             side_menu: SideMenu::new(),
             footer_message: None,
+            footer_message_at: None,
             lsp_status: None,
             lsp_diagnostic: None,
             lsp_enabled: false,
@@ -59,7 +61,11 @@ impl<'a> App<'a> {
             AppState::QueryInput => AppState::LeftPane,
             AppState::LeftPane => AppState::RightPane,
             AppState::RightPane => {
-                if self.query_bar_visible { AppState::QueryInput } else { AppState::LeftPane }
+                if self.query_bar_visible {
+                    AppState::QueryInput
+                } else {
+                    AppState::LeftPane
+                }
             }
             AppState::SideMenu => AppState::QueryInput,
         };
@@ -69,7 +75,11 @@ impl<'a> App<'a> {
         self.state = match self.state {
             AppState::QueryInput => AppState::RightPane,
             AppState::LeftPane => {
-                if self.query_bar_visible { AppState::QueryInput } else { AppState::RightPane }
+                if self.query_bar_visible {
+                    AppState::QueryInput
+                } else {
+                    AppState::RightPane
+                }
             }
             AppState::RightPane => AppState::LeftPane,
             AppState::SideMenu => AppState::QueryInput,

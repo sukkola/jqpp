@@ -27,43 +27,47 @@ impl Executor {
             path: (),
         };
 
-        let modules = loader
-            .load(&arena, program)
-            .map_err(|e| {
-                // Each entry is (Expect, &str-at-error-position).
-                // The source slice can be the entire remaining input — truncate it.
-                // Error<S> = (Expect<S>, S); .0 is the kind, .1 is the source
-                // slice at the error position (may be the rest of the query —
-                // cap it so we don't echo the entire input back).
-                // Outer vec is (File, load::Error); load::Error has Lex / Parse variants.
-                // lex::Error<S> = (Expect<S>, S) where S is the source slice at the
-                // error position — cap it so we don't echo the entire query back.
-                let msgs: Vec<String> = e.iter().map(|(_file, load_err)| {
+        let modules = loader.load(&arena, program).map_err(|e| {
+            let msgs: Vec<String> = e
+                .iter()
+                .map(|(_file, load_err)| {
                     use jaq_core::load::Error as LE;
                     match load_err {
                         LE::Lex(lex_errs) => {
-                            let parts: Vec<String> = lex_errs.iter().map(|(_, src)| {
-                                let preview: String = src.chars().take(30).collect();
-                                let ellipsis = if src.chars().count() > 30 { "…" } else { "" };
-                                format!("unexpected token {:?}{}", preview, ellipsis)
-                            }).collect();
-                            if parts.is_empty() { "lex error".to_string() } else { parts.join("; ") }
+                            let parts: Vec<String> = lex_errs
+                                .iter()
+                                .map(|(_, src)| {
+                                    let preview: String = src.chars().take(30).collect();
+                                    let ellipsis =
+                                        if src.chars().count() > 30 { "…" } else { "" };
+                                    format!("unexpected token {:?}{}", preview, ellipsis)
+                                })
+                                .collect();
+                            if parts.is_empty() {
+                                "lex error".to_string()
+                            } else {
+                                parts.join("; ")
+                            }
                         }
                         other => format!("{other:?}"),
                     }
-                }).collect();
-                anyhow::anyhow!("Parse error: {}", msgs.join("; "))
-            })?;
+                })
+                .collect();
+            anyhow::anyhow!("Parse error: {}", msgs.join("; "))
+        })?;
 
         let filter = Compiler::default()
             .with_funs(funs)
             .compile(modules)
             .map_err(|e| {
-                // Each entry is (File, Vec<(name, Undefined)>); extract the undefined names.
-                let msgs: Vec<String> = e.iter().map(|(_, undefs)| {
-                    let names: Vec<String> = undefs.iter().map(|(name, _)| name.to_string()).collect();
-                    format!("undefined: {}", names.join(", "))
-                }).collect();
+                let msgs: Vec<String> = e
+                    .iter()
+                    .map(|(_, undefs)| {
+                        let names: Vec<String> =
+                            undefs.iter().map(|(name, _)| name.to_string()).collect();
+                        format!("undefined: {}", names.join(", "))
+                    })
+                    .collect();
                 anyhow::anyhow!("Compile error: {}", msgs.join("; "))
             })?;
 
@@ -73,8 +77,6 @@ impl Executor {
         let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new([]));
         let out = filter.id.run((ctx, val_input)).map(unwrap_valr);
 
-        // Cap output so a runaway query (e.g. `.[]` on a 100K-element array)
-        // cannot allocate unbounded memory and freeze the UI.
         const MAX_RESULTS: usize = 10_000;
         let mut results = Vec::new();
         for res in out {
@@ -89,15 +91,13 @@ impl Executor {
         Ok(results)
     }
 
-    /// If `query` ends with `| @csv` or `| @tsv`, returns `(base_query, "@csv"/"@tsv")`.
-    /// Handles optional whitespace around the pipe and before the operator.
     pub fn strip_format_op(query: &str) -> Option<(String, &'static str)> {
         let t = query.trim_end();
         for op in &["@csv", "@tsv"] {
-            if t.ends_with(op) {
-                let rest = t[..t.len() - op.len()].trim_end();
-                if rest.ends_with('|') {
-                    let base = rest[..rest.len() - 1].trim_end().to_string();
+            if let Some(rest) = t.strip_suffix(op) {
+                let rest = rest.trim_end();
+                if let Some(stripped) = rest.strip_suffix('|') {
+                    let base = stripped.trim_end().to_string();
                     return Some((base, op));
                 }
             }
@@ -105,10 +105,6 @@ impl Executor {
         None
     }
 
-    /// Execute `query`, applying `@csv` or `@tsv` formatting if the query ends
-    /// with one of those operators.  Returns `(results, raw_output)` where
-    /// `raw_output` is `true` when the results should be displayed as plain text
-    /// (no JSON quotes).
     pub fn execute_query(query: &str, input: &Value) -> Result<(Vec<Value>, bool)> {
         if let Some((base, op)) = Self::strip_format_op(query) {
             let base_results = Self::execute(&base, input)?;
@@ -133,8 +129,8 @@ impl Executor {
         results
             .iter()
             .map(|v| {
-                if raw {
-                    if let Value::String(s) = v { return s.clone(); }
+                if raw && let Some(s) = v.as_str() {
+                    return s.to_string();
                 }
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".to_string())
             })
@@ -189,9 +185,6 @@ fn val_to_value(val: Val) -> Value {
         Val::Obj(o) => {
             let mut map = serde_json::Map::new();
             for (k, v) in o.iter() {
-                // Keys are Val, not Arc<str>; calling .to_string() on them would
-                // invoke Val's JSON Display impl and wrap the key in extra quotes.
-                // Extract the raw bytes instead, matching how BStr/TStr values are handled.
                 let key = match k {
                     Val::BStr(b) | Val::TStr(b) => String::from_utf8_lossy(b).into_owned(),
                     _ => k.to_string(),
@@ -203,8 +196,6 @@ fn val_to_value(val: Val) -> Value {
     }
 }
 
-/// Encode a single CSV field: null → "", bool/number → bare, string → double-quoted
-/// with internal `"` doubled.  Nested arrays/objects are an error (matching jq).
 fn csv_field(v: &Value) -> Result<String> {
     match v {
         Value::Null => Ok(String::new()),
@@ -220,7 +211,6 @@ fn csv_field(v: &Value) -> Result<String> {
     }
 }
 
-/// `@csv` — input must be an array; returns a comma-separated string.
 fn format_csv(v: &Value) -> Result<String> {
     let arr = v.as_array().ok_or_else(|| {
         anyhow::anyhow!(
@@ -232,8 +222,6 @@ fn format_csv(v: &Value) -> Result<String> {
     Ok(fields?.join(","))
 }
 
-/// `@tsv` — input must be an array; returns a tab-separated string.
-/// Strings are unquoted; tabs or newlines inside a value are an error (matching jq).
 fn format_tsv(v: &Value) -> Result<String> {
     let arr = v.as_array().ok_or_else(|| {
         anyhow::anyhow!(
@@ -250,14 +238,17 @@ fn format_tsv(v: &Value) -> Result<String> {
             Value::String(s) => {
                 if s.contains('\t') || s.contains('\n') {
                     return Err(anyhow::anyhow!(
-                        "Runtime error: @tsv string contains tab or newline: {:?}", s
+                        "Runtime error: @tsv string contains tab or newline: {:?}",
+                        s
                     ));
                 }
                 s.clone()
             }
-            _ => return Err(anyhow::anyhow!(
-                "Runtime error: @tsv does not support nested arrays or objects"
-            )),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Runtime error: @tsv does not support nested arrays or objects"
+                ))
+            }
         };
         fields.push(field);
     }
@@ -306,8 +297,6 @@ mod tests {
         assert_eq!(res, vec![json!(0.55)]);
     }
 
-    // ── multi-pipe with add // 0 and select ─────────────────────────────────
-
     #[test]
     fn complex_user_query_matches_jq() {
         let input = json!({
@@ -320,16 +309,15 @@ mod tests {
         let query = ".users | map({name,total_spent:([.orders[].total] | add // 0)}) | map(select(.total_spent>50))";
         let (results, raw) = Executor::execute_query(query, &input).unwrap();
         assert!(!raw);
-        // map(…) returns a single array value, not multiple outputs.
-        assert_eq!(results, vec![json!([
-            {"name": "Alice",   "total_spent": 70},
-            {"name": "Bob",     "total_spent": 200},
-        ])]);
+        assert_eq!(
+            results,
+            vec![json!([
+                {"name": "Alice",   "total_spent": 70},
+                {"name": "Bob",     "total_spent": 200},
+            ])]
+        );
     }
 
-    // ── complex query suite ──────────────────────────────────────────────────
-
-    /// fromjson: parse a JSON-encoded string value into a structured value.
     #[test]
     fn fromjson_parses_embedded_string() {
         let input = json!({"log": "{\"event\":\"login\",\"user\":\"alice\"}"});
@@ -337,7 +325,6 @@ mod tests {
         assert_eq!(res, vec![json!("alice")]);
     }
 
-    /// tojson: serialise a value back to a JSON string.
     #[test]
     fn tojson_round_trips() {
         let input = json!({"x": 1, "y": 2});
@@ -345,7 +332,6 @@ mod tests {
         assert_eq!(res, vec![json!(1)]);
     }
 
-    /// sort_by + reverse + index into result.
     #[test]
     fn sort_by_reverse_first() {
         let input = json!({"users": [
@@ -353,23 +339,20 @@ mod tests {
             {"id": 2, "name": "Bob",     "score": 72},
             {"id": 3, "name": "Charlie", "score": 91}
         ]});
-        let (res, _) = Executor::execute_query(
-            ".users | sort_by(.score) | reverse | .[0].name", &input,
-        ).unwrap();
+        let (res, _) =
+            Executor::execute_query(".users | sort_by(.score) | reverse | .[0].name", &input)
+                .unwrap();
         assert_eq!(res, vec![json!("Charlie")]);
     }
 
-    /// select inside map to filter even numbers.
     #[test]
     fn map_select_even() {
         let input = json!({"items": [1, 2, 3, 4, 5, 6, 7, 8]});
-        let (res, _) = Executor::execute_query(
-            ".items | [.[] | select(. % 2 == 0)]", &input,
-        ).unwrap();
+        let (res, _) =
+            Executor::execute_query(".items | [.[] | select(. % 2 == 0)]", &input).unwrap();
         assert_eq!(res, vec![json!([2, 4, 6, 8])]);
     }
 
-    /// add / length for arithmetic mean.
     #[test]
     fn arithmetic_mean() {
         let input = json!({"scores": [10, 20, 30, 40, 50]});
@@ -377,18 +360,17 @@ mod tests {
         assert_eq!(res, vec![json!(30.0)]);
     }
 
-    /// to_entries / from_entries: filter object keys by value type.
     #[test]
     fn to_from_entries_filter_by_type() {
         let input = json!({"name": "Alice", "age": 30, "active": true});
         let (res, _) = Executor::execute_query(
             "to_entries | map(select(.value | type == \"number\")) | from_entries",
             &input,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(res, vec![json!({"age": 30})]);
     }
 
-    /// reduce: sum of an array.
     #[test]
     fn reduce_sum() {
         let input = json!([1, 2, 3, 4, 5]);
@@ -396,7 +378,6 @@ mod tests {
         assert_eq!(res, vec![json!(15)]);
     }
 
-    /// group_by then aggregate totals.
     #[test]
     fn group_by_aggregate() {
         let input = json!([
@@ -407,11 +388,11 @@ mod tests {
         let (res, _) = Executor::execute_query(
             "[group_by(.k)[] | {key:.[0].k, value:(map(.v)|add)}] | from_entries",
             &input,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(res, vec![json!({"a": 4, "b": 2})]);
     }
 
-    /// unique_by deduplicates on a key.
     #[test]
     fn unique_by_dedup() {
         let input = json!([
@@ -420,20 +401,21 @@ mod tests {
             {"id": 1, "name": "Alice2"}
         ]);
         let (res, _) = Executor::execute_query("unique_by(.id)", &input).unwrap();
-        assert_eq!(res, vec![json!([
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"}
-        ])]);
+        assert_eq!(
+            res,
+            vec![json!([
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob"}
+            ])]
+        );
     }
 
-    /// limit: take first N outputs from a generator.
     #[test]
     fn limit_range() {
         let (res, _) = Executor::execute_query("[limit(3; range(10))]", &json!(null)).unwrap();
         assert_eq!(res, vec![json!([0, 1, 2])]);
     }
 
-    /// any / all on array elements.
     #[test]
     fn any_all_array() {
         let input = json!([1, 2, 3, 4, 5]);
@@ -441,17 +423,14 @@ mod tests {
         assert_eq!(res, vec![json!(true), json!(true)]);
     }
 
-    /// try-catch: gracefully handle a type error.
     #[test]
     fn try_catch_type_error() {
         let input = json!("not-a-number");
-        let (res, _) = Executor::execute_query(
-            "try tonumber catch \"not a number\"", &input,
-        ).unwrap();
+        let (res, _) =
+            Executor::execute_query("try tonumber catch \"not a number\"", &input).unwrap();
         assert_eq!(res, vec![json!("not a number")]);
     }
 
-    /// Variable binding with `as $var`.
     #[test]
     fn variable_binding() {
         let input = json!({"teams": [
@@ -462,44 +441,46 @@ mod tests {
             ".teams | map(. as $team | {team:$team.name, avg_age:($team.members | map(.age) | add / length), members_over_25:($team.members | map(select(.age > 25)) | map(.name))})",
             &input,
         ).unwrap();
-        assert_eq!(res, vec![json!([
-            {"team": "A", "avg_age": 25.0, "members_over_25": ["x"]},
-            {"team": "B", "avg_age": 40.0, "members_over_25": ["z"]}
-        ])]);
+        assert_eq!(
+            res,
+            vec![json!([
+                {"team": "A", "avg_age": 25.0, "members_over_25": ["x"]},
+                {"team": "B", "avg_age": 40.0, "members_over_25": ["z"]}
+            ])]
+        );
     }
 
-    /// Zipping two arrays by index via array constructor.
     #[test]
     fn zip_arrays_to_objects() {
         let input = json!([[1, 2], [3, 4], [5, 6]]);
-        let (res, _) = Executor::execute_query(
-            "[.[] | {a:.[0], b:.[1], sum:(.[0]+.[1])}]", &input,
-        ).unwrap();
-        assert_eq!(res, vec![json!([
-            {"a": 1, "b": 2, "sum": 3},
-            {"a": 3, "b": 4, "sum": 7},
-            {"a": 5, "b": 6, "sum": 11}
-        ])]);
+        let (res, _) =
+            Executor::execute_query("[.[] | {a:.[0], b:.[1], sum:(.[0]+.[1])}]", &input).unwrap();
+        assert_eq!(
+            res,
+            vec![json!([
+                {"a": 1, "b": 2, "sum": 3},
+                {"a": 3, "b": 4, "sum": 7},
+                {"a": 5, "b": 6, "sum": 11}
+            ])]
+        );
     }
 
-    /// sort_by + last: find the most expensive item.
     #[test]
     fn sort_by_last() {
         let input = json!({"prices": {"apple": 1.5, "banana": 0.5, "cherry": 3.0}});
         let (res, _) = Executor::execute_query(
-            ".prices | to_entries | sort_by(.value) | last | .key", &input,
-        ).unwrap();
+            ".prices | to_entries | sort_by(.value) | last | .key",
+            &input,
+        )
+        .unwrap();
         assert_eq!(res, vec![json!("cherry")]);
     }
 
-    /// Single-quoted strings in the query are invalid jq syntax (shell artefact).
     #[test]
     fn single_quoted_string_is_parse_error() {
         let err = Executor::execute("'hello'", &json!(null)).unwrap_err();
         assert!(err.to_string().contains("Parse error"), "{err}");
     }
-
-    // ── @csv / @tsv ───────────────────────────────────────────────────────────
 
     #[test]
     fn csv_basic_types() {
@@ -509,9 +490,6 @@ mod tests {
 
     #[test]
     fn csv_string_with_comma_and_quote() {
-        // "a,b"      → quoted because of comma:         "a,b"
-        // say "hi"   → internal " doubled + wrapped:    "say ""hi"""
-        // (the 3 closing " are: last "" from doubling + the field-closing ")
         let v = json!(["a,b", "say \"hi\""]);
         assert_eq!(format_csv(&v).unwrap(), "\"a,b\",\"say \"\"hi\"\"\"");
     }

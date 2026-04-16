@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     let constraints = if app.query_bar_visible {
         vec![
             Constraint::Length(3), // Query bar
@@ -105,9 +105,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else {
             let preview = String::from_utf8_lossy(&raw[..MAX_BYTES]);
             // trim to last newline so we don't cut mid-codepoint
-            let trimmed = preview.rfind('\n').map(|i| &preview[..i]).unwrap_or(&preview);
-            format!("{}\n\n[… {} KB total, display truncated]",
-                trimmed, raw.len() / 1024)
+            let trimmed = preview
+                .rfind('\n')
+                .map(|i| &preview[..i])
+                .unwrap_or(&preview);
+            format!(
+                "{}\n\n[… {} KB total, display truncated]",
+                trimmed,
+                raw.len() / 1024
+            )
         }
     } else {
         "No input data".to_string()
@@ -183,8 +189,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let mut footer_text = if let Some(ref msg) = app.footer_message {
         format!(" {} ", msg)
     } else {
-        " enter submit · tab/shift+tab nav · ctrl+c/q quit · ctrl+y copy · ctrl+t toggle input · ctrl+s save · ctrl+m menu "
-            .to_string()
+        format!(" {} ", keymap.hint_string())
     };
 
     if let Some(ref lsp_diag) = app.lsp_diagnostic {
@@ -253,7 +258,8 @@ mod tests {
     fn render(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
+        let keymap = crate::keymap::Keymap::default();
+        terminal.draw(|f| draw(f, app, &keymap)).unwrap();
         terminal.backend().buffer().clone()
     }
 
@@ -274,7 +280,11 @@ mod tests {
         let buf = render(&mut app, 80, 24);
         // Query bar occupies rows 0-2; title appears on row 0.
         let row0 = region(&buf, 0, 0, 80, 1);
-        assert!(row0.contains("Query"), "Query bar title missing in: {}", row0);
+        assert!(
+            row0.contains("Query"),
+            "Query bar title missing in: {}",
+            row0
+        );
     }
 
     #[test]
@@ -283,7 +293,11 @@ mod tests {
         // With query bar visible, body starts at row 3.
         let buf = render(&mut app, 80, 24);
         let row3 = region(&buf, 0, 3, 80, 4);
-        assert!(row3.contains("Input"), "Input pane title missing in: {}", row3);
+        assert!(
+            row3.contains("Input"),
+            "Input pane title missing in: {}",
+            row3
+        );
     }
 
     #[test]
@@ -291,7 +305,11 @@ mod tests {
         let mut app = App::new();
         let buf = render(&mut app, 80, 24);
         let row3 = region(&buf, 40, 3, 80, 4);
-        assert!(row3.contains("Output"), "Output pane title missing in: {}", row3);
+        assert!(
+            row3.contains("Output"),
+            "Output pane title missing in: {}",
+            row3
+        );
     }
 
     // ── Content rendering ─────────────────────────────────────────────────────
@@ -307,7 +325,11 @@ mod tests {
         let buf = render(&mut app, 80, 24);
         // Left pane is columns 0-39, rows 4-22 (inside border).
         let left = region(&buf, 0, 4, 40, 22);
-        assert!(left.contains("alice"), "Input pane must show json value, got:\n{}", left);
+        assert!(
+            left.contains("alice"),
+            "Input pane must show json value, got:\n{}",
+            left
+        );
     }
 
     #[test]
@@ -316,8 +338,16 @@ mod tests {
         app.results = vec![json!("hello"), json!(42)];
         let buf = render(&mut app, 80, 24);
         let right = region(&buf, 40, 4, 80, 22);
-        assert!(right.contains("hello"), "Output pane must show string result: {}", right);
-        assert!(right.contains("42"), "Output pane must show number result: {}", right);
+        assert!(
+            right.contains("hello"),
+            "Output pane must show string result: {}",
+            right
+        );
+        assert!(
+            right.contains("42"),
+            "Output pane must show number result: {}",
+            right
+        );
     }
 
     #[test]
@@ -326,7 +356,11 @@ mod tests {
         app.error = Some("compile error: unexpected token".to_string());
         let buf = render(&mut app, 80, 24);
         let right = region(&buf, 40, 4, 80, 22);
-        assert!(right.contains("compile error"), "Error must appear in output pane: {}", right);
+        assert!(
+            right.contains("compile error"),
+            "Error must appear in output pane: {}",
+            right
+        );
     }
 
     // ── Multi-level pipe query output ─────────────────────────────────────────
@@ -365,10 +399,15 @@ mod tests {
         app.results = Executor::execute(
             ".config.name | ascii_upcase",
             &json!({"config": {"name": "hello"}}),
-        ).unwrap();
+        )
+        .unwrap();
         let buf = render(&mut app, 80, 24);
         let right = region(&buf, 40, 4, 80, 22);
-        assert!(right.contains("HELLO"), "Pipe query result must render in output pane: {}", right);
+        assert!(
+            right.contains("HELLO"),
+            "Pipe query result must render in output pane: {}",
+            right
+        );
     }
 
     // ── Large content truncation ──────────────────────────────────────────────
@@ -404,11 +443,25 @@ mod tests {
             String::from_utf8_lossy(&raw).into_owned()
         } else {
             let preview = String::from_utf8_lossy(&raw[..MAX_BYTES]);
-            let trimmed = preview.rfind('\n').map(|i| &preview[..i]).unwrap_or(&preview);
-            format!("{}\n\n[… {} KB total, display truncated]", trimmed, raw.len() / 1024)
+            let trimmed = preview
+                .rfind('\n')
+                .map(|i| &preview[..i])
+                .unwrap_or(&preview);
+            format!(
+                "{}\n\n[… {} KB total, display truncated]",
+                trimmed,
+                raw.len() / 1024
+            )
         };
-        assert!(display.contains("truncated"), "display string must contain truncation notice");
-        assert!(display.contains("KB total"), "display string must mention total KB: {}", &display[display.len()-60..]);
+        assert!(
+            display.contains("truncated"),
+            "display string must contain truncation notice"
+        );
+        assert!(
+            display.contains("KB total"),
+            "display string must mention total KB: {}",
+            &display[display.len() - 60..]
+        );
     }
 
     // ── Footer ────────────────────────────────────────────────────────────────
@@ -419,6 +472,10 @@ mod tests {
         let buf = render(&mut app, 80, 24);
         // Footer is the last row (row 23).
         let footer = region(&buf, 0, 23, 80, 24);
-        assert!(footer.contains("enter"), "Footer must show key hints: {}", footer);
+        assert!(
+            footer.contains("enter"),
+            "Footer must show key hints: {}",
+            footer
+        );
     }
 }
