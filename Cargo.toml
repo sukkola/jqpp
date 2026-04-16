@@ -1,0 +1,33 @@
+[package]
+name = "jqt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90.0"
+
+[dependencies]
+ratatui = "0.29.0"
+crossterm = { version = "0.28.1", features = ["use-dev-tty"] }
+tui-textarea = "0.7.0"
+jaq-core = "3.0.0"
+jaq-std = "3.0.0"
+jaq-json = { version = "2.0.0", features = ["serde"] }
+serde_json = "1.0.138"
+tokio = { version = "1.43.0", features = ["full"] }
+clap = { version = "4.5.27", features = ["derive"] }
+arboard = "3.4.1"
+num-traits = "0.2.19"
+libc = "0.2"
+anyhow = "1.0"
+signal-hook = "0.3"
+
+[dev-dependencies]
+libc = "0.2"
+insta = { version = "1", features = ["yaml"] }
+
+[[bin]]
+name = "jqt"
+path = "src/main.rs"
+
+[[bin]]
+name = "mock_lsp"
+path = "tests/mock_lsp.rs"
