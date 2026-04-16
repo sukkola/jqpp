@@ -7,6 +7,7 @@ on:
 
 env:
   BIN_NAME: jqpp
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-linux:
@@ -90,3 +91,63 @@ jobs:
             artifacts/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          VERSION_NO_V="${VERSION#v}"
+
+          HASH_AARCH64_DARWIN=$(grep "jqpp-aarch64-apple-darwin.tar.gz"       artifacts/SHA256SUMS | awk '{print $1}')
+          HASH_X86_64_DARWIN=$(grep  "jqpp-x86_64-apple-darwin.tar.gz"        artifacts/SHA256SUMS | awk '{print $1}')
+          HASH_AARCH64_LINUX=$(grep  "jqpp-aarch64-unknown-linux-gnu.tar.gz"  artifacts/SHA256SUMS | awk '{print $1}')
+          HASH_X86_64_LINUX=$(grep   "jqpp-x86_64-unknown-linux-gnu.tar.gz"   artifacts/SHA256SUMS | awk '{print $1}')
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/sukkola/homebrew-tap.git" tap
+          cd tap
+
+          cat > Formula/jqpp.rb <<FORMULA
+          class Jqpp < Formula
+            desc "A robust TUI for interactively exploring JSON with jq-like queries"
+            homepage "https://github.com/sukkola/jqpp"
+            version "${VERSION_NO_V}"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-aarch64-apple-darwin.tar.gz"
+                sha256 "${HASH_AARCH64_DARWIN}"
+              end
+              on_intel do
+                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-x86_64-apple-darwin.tar.gz"
+                sha256 "${HASH_X86_64_DARWIN}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${HASH_AARCH64_LINUX}"
+              end
+              on_intel do
+                url "https://github.com/sukkola/jqpp/releases/download/${VERSION}/jqpp-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${HASH_X86_64_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "jqpp"
+            end
+
+            test do
+              system "#{bin}/jqpp", "--version"
+            end
+          end
+          FORMULA
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Formula/jqpp.rb
+          git commit -m "jqpp ${VERSION_NO_V}"
+          git push

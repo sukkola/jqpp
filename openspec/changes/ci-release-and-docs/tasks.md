@@ -17,7 +17,8 @@
 
 - [x] 3.1 In `sukkola/homebrew-tap`, create `Formula/jqpp.rb` using `on_macos` block with `on_arm` / `on_intel` architecture selectors (Template created in `homebrew/jqpp.rb`)
 - [x] 3.2 Set archive URLs pointing to the GitHub Release assets (`https://github.com/sukkola/jqpp/releases/download/v{version}/jqpp-{target}.tar.gz`)
-- [ ] 3.3 Fill in SHA-256 hashes from the first real release's `SHA256SUMS` file
+- [x] 3.3 SHA-256 hashes are now filled automatically by the release pipeline
+- [ ] 3.3a Add `HOMEBREW_TAP_TOKEN` secret to the jqpp repo (GitHub PAT with `contents: write` on `sukkola/homebrew-tap`)
 - [x] 3.4 Add `bin.install "jqpp"` and a `test` block (`system "#{bin}/jqpp", "--version"`)
 - [ ] 3.5 Run `brew audit --strict Formula/jqpp.rb` and fix any issues
 
