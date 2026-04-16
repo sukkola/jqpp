@@ -16,10 +16,13 @@
 //!    enable_raw_mode() / cfmakeraw has been called and IXON is cleared.
 
 use std::process::{Command, Stdio};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
-const BINARY: &str = "target/debug/jqt";
+const BINARY: &str = "target/debug/jqpp";
 
 fn wait_for_exit(child: &mut std::process::Child, deadline: Duration) -> bool {
     let start = Instant::now();
@@ -38,27 +41,41 @@ fn wait_for_exit(child: &mut std::process::Child, deadline: Duration) -> bool {
 unsafe fn open_pty() -> Option<(libc::c_int, libc::c_int)> {
     unsafe {
         let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        if master < 0 { return None; }
-        if libc::grantpt(master) != 0 { libc::close(master); return None; }
-        if libc::unlockpt(master) != 0 { libc::close(master); return None; }
+        if master < 0 {
+            return None;
+        }
+        if libc::grantpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
+        if libc::unlockpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
         let slave_ptr = libc::ptsname(master);
-        if slave_ptr.is_null() { libc::close(master); return None; }
+        if slave_ptr.is_null() {
+            libc::close(master);
+            return None;
+        }
         let slave_path =
             std::ffi::CString::new(std::ffi::CStr::from_ptr(slave_ptr).to_bytes()).ok()?;
         let slave = libc::open(slave_path.as_ptr(), libc::O_RDWR);
-        if slave < 0 { libc::close(master); return None; }
+        if slave < 0 {
+            libc::close(master);
+            return None;
+        }
         Some((master, slave))
     }
 }
 
-/// Spawn jqt with the slave PTY as stdin/stdout/stderr and as the
+/// Spawn jqpp with the slave PTY as stdin/stdout/stderr and as the
 /// controlling terminal (via setsid + TIOCSCTTY).
 #[cfg(unix)]
 fn spawn_with_pty(slave_fd: libc::c_int) -> std::process::Child {
     use std::os::unix::io::FromRawFd;
     use std::os::unix::process::CommandExt;
 
-    let slave_in  = unsafe { libc::dup(slave_fd) };
+    let slave_in = unsafe { libc::dup(slave_fd) };
     let slave_out = unsafe { libc::dup(slave_fd) };
     let slave_err = unsafe { libc::dup(slave_fd) };
 
@@ -91,10 +108,11 @@ fn start_drain_thread(master_fd: libc::c_int) -> Arc<AtomicBool> {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
-            let n = unsafe {
-                libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-            };
-            if n <= 0 { break; }
+            let n =
+                unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
             ready_clone.store(true, Ordering::Release);
         }
     });
@@ -106,7 +124,9 @@ fn start_drain_thread(master_fd: libc::c_int) -> Arc<AtomicBool> {
 fn wait_for_tui(ready: &Arc<AtomicBool>) {
     let deadline = Instant::now() + Duration::from_secs(4);
     while !ready.load(Ordering::Acquire) {
-        if Instant::now() >= deadline { break; }
+        if Instant::now() >= deadline {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
     // Small margin after first frame — raw mode propagation to PTY is sync,
@@ -118,7 +138,11 @@ fn wait_for_tui(ready: &Arc<AtomicBool>) {
 #[cfg(unix)]
 fn pty_write(master_fd: libc::c_int, bytes: &[u8]) {
     unsafe {
-        libc::write(master_fd, bytes.as_ptr() as *const libc::c_void, bytes.len());
+        libc::write(
+            master_fd,
+            bytes.as_ptr() as *const libc::c_void,
+            bytes.len(),
+        );
     }
 }
 
@@ -132,7 +156,10 @@ fn pty_write(master_fd: libc::c_int, bytes: &[u8]) {
 fn test_ctrl_c_exits() {
     let (master_fd, slave_fd) = match unsafe { open_pty() } {
         Some(p) => p,
-        None => { eprintln!("open_pty unavailable — skipping"); return; }
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
     };
 
     let mut child = spawn_with_pty(slave_fd);
@@ -163,14 +190,17 @@ fn test_ctrl_c_exits() {
 fn test_ctrl_q_exits() {
     let (master_fd, slave_fd) = match unsafe { open_pty() } {
         Some(p) => p,
-        None => { eprintln!("open_pty unavailable — skipping"); return; }
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
     };
 
     let mut child = spawn_with_pty(slave_fd);
     unsafe { libc::close(slave_fd) };
 
     let ready = start_drain_thread(master_fd);
-    wait_for_tui(&ready);   // guarantees IXON is cleared before 0x11 is sent
+    wait_for_tui(&ready); // guarantees IXON is cleared before 0x11 is sent
 
     if child.try_wait().ok().flatten().is_some() {
         unsafe { libc::close(master_fd) };
@@ -193,7 +223,10 @@ fn test_ctrl_q_exits() {
 fn test_q_after_tab_exits() {
     let (master_fd, slave_fd) = match unsafe { open_pty() } {
         Some(p) => p,
-        None => { eprintln!("open_pty unavailable — skipping"); return; }
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
     };
 
     let mut child = spawn_with_pty(slave_fd);
@@ -207,9 +240,9 @@ fn test_q_after_tab_exits() {
         return;
     }
 
-    pty_write(master_fd, b"\t");                   // Tab → LeftPane
+    pty_write(master_fd, b"\t"); // Tab → LeftPane
     std::thread::sleep(Duration::from_millis(150));
-    pty_write(master_fd, b"q");                    // q → quit
+    pty_write(master_fd, b"q"); // q → quit
 
     assert!(
         wait_for_exit(&mut child, Duration::from_secs(3)),
@@ -225,7 +258,10 @@ fn test_q_after_tab_exits() {
 fn test_q_after_shift_tab_exits() {
     let (master_fd, slave_fd) = match unsafe { open_pty() } {
         Some(p) => p,
-        None => { eprintln!("open_pty unavailable — skipping"); return; }
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
     };
 
     let mut child = spawn_with_pty(slave_fd);
@@ -239,9 +275,9 @@ fn test_q_after_shift_tab_exits() {
         return;
     }
 
-    pty_write(master_fd, b"\x1b[Z");               // Shift+Tab → RightPane
+    pty_write(master_fd, b"\x1b[Z"); // Shift+Tab → RightPane
     std::thread::sleep(Duration::from_millis(150));
-    pty_write(master_fd, b"q");                    // q → quit
+    pty_write(master_fd, b"q"); // q → quit
 
     assert!(
         wait_for_exit(&mut child, Duration::from_secs(3)),

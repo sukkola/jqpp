@@ -1,5 +1,5 @@
-use jqt::config;
-use jqt::keymap::{parse_key_binding, Action, KeyBinding, Keymap};
+use jqpp::config;
+use jqpp::keymap::{parse_key_binding, Action, KeyBinding, Keymap};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
 use std::path::Path;

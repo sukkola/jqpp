@@ -1,6 +1,7 @@
 [package]
-name = "jqt"
+name = "jqpp"
 version = "0.1.0"
+description = "A robust TUI for interactively exploring JSON with jq-like queries"
 edition = "2024"
 rust-version = "1.90.0"
 
@@ -27,7 +28,7 @@ libc = "0.2"
 insta = { version = "1", features = ["yaml"] }
 
 [[bin]]
-name = "jqt"
+name = "jqpp"
 path = "src/main.rs"
 
 [[bin]]

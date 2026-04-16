@@ -31,7 +31,7 @@ impl LspProvider {
     }
 
     pub async fn start(&mut self, msg_tx: mpsc::Sender<LspMessage>) -> Result<(), Box<dyn std::error::Error>> {
-        let lsp_bin = std::env::var("JQT_LSP_BIN").unwrap_or_else(|_| "jq-lsp".to_string());
+        let lsp_bin = std::env::var("JQPP_LSP_BIN").unwrap_or_else(|_| "jq-lsp".to_string());
         let mut child = Command::new(lsp_bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

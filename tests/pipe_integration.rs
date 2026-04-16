@@ -10,20 +10,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Spawn jqt with piped stdin (and optionally extra args), wait up to
+/// Spawn jqpp with piped stdin (and optionally extra args), wait up to
 /// `timeout` for it to exit on its own, then kill it and collect output.
-fn run_piped(
-    input: &[u8],
-    extra_args: &[&str],
-    timeout: Duration,
-) -> (Vec<u8>, Vec<u8>) {
-    let mut child = Command::new("target/debug/jqt")
+fn run_piped(input: &[u8], extra_args: &[&str], timeout: Duration) -> (Vec<u8>, Vec<u8>) {
+    let mut child = Command::new("target/debug/jqpp")
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to spawn target/debug/jqt — run `cargo build` first");
+        .expect("Failed to spawn target/debug/jqpp — run `cargo build` first");
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input);
@@ -116,17 +112,17 @@ fn pipe_no_tty_exits_cleanly() {
     );
 }
 
-/// When JSON is valid and a TTY is available (tested via JQT_SKIP_TTY_CHECK to
+/// When JSON is valid and a TTY is available (tested via JQPP_SKIP_TTY_CHECK to
 /// simulate headless), the JSON parse step succeeds (no parse error in stderr).
 #[test]
 fn pipe_valid_json_parses_without_error() {
-    let mut child = Command::new("target/debug/jqt")
+    let mut child = Command::new("target/debug/jqpp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("JQT_SKIP_TTY_CHECK", "1")
+        .env("JQPP_SKIP_TTY_CHECK", "1")
         .spawn()
-        .expect("Failed to spawn jqt");
+        .expect("Failed to spawn jqpp");
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(br#"{"name":"alice","age":30}"#);
@@ -160,13 +156,13 @@ fn pipe_valid_json_parses_without_error() {
 /// Invalid JSON must produce a parse error (not a crossterm crash or panic).
 #[test]
 fn pipe_invalid_json_parse_error() {
-    let mut child = Command::new("target/debug/jqt")
+    let mut child = Command::new("target/debug/jqpp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("JQT_SKIP_TTY_CHECK", "1")
+        .env("JQPP_SKIP_TTY_CHECK", "1")
         .spawn()
-        .expect("Failed to spawn jqt");
+        .expect("Failed to spawn jqpp");
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(b"this is not json");

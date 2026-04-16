@@ -1,11 +1,11 @@
-use jqt::app::{App, AppState};
-use jqt::executor::Executor;
-use jqt::completions::lsp::{LspMessage, LspProvider};
-use jqt::keymap;
-use jqt::config;
-use jqt::ui;
-use jqt::widgets;
-use jqt::completions;
+use jqpp::app::{App, AppState};
+use jqpp::executor::Executor;
+use jqpp::completions::lsp::{LspMessage, LspProvider};
+use jqpp::keymap;
+use jqpp::config;
+use jqpp::ui;
+use jqpp::widgets;
+use jqpp::completions;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -124,7 +124,7 @@ fn setup_panic_hook(debug: bool) {
         if debug {
             original_panic_hook(panic_info);
         } else {
-            eprintln!("jqt panicked. Use --debug for more info.");
+            eprintln!("jqpp panicked. Use --debug for more info.");
         }
     }));
 }
@@ -139,9 +139,9 @@ fn main() {
     
     if let Err(e) = actual_main(args) {
         if std::env::var("RUST_BACKTRACE").is_ok() {
-            eprintln!("jqt CRITICAL ERROR: {:?}", e);
+            eprintln!("jqpp CRITICAL ERROR: {:?}", e);
         } else {
-            eprintln!("jqt CRITICAL ERROR: {}", e);
+            eprintln!("jqpp CRITICAL ERROR: {}", e);
             eprintln!("\nRun with --debug to see a full stack trace.");
         }
         std::process::exit(1);
@@ -185,17 +185,15 @@ fn actual_main(args: Args) -> Result<()> {
     let tty_handle = get_tty_handle();
 
     use std::os::unix::io::AsRawFd;
-    if let Some(ref tty) = tty_handle {
-        if !stdin_is_terminal {
-            unsafe {
-                if libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) == -1 {
-                    return Err(anyhow::anyhow!("Failed to redirect TTY to stdin"));
-                }
+    if let Some(ref tty) = tty_handle && !stdin_is_terminal {
+        unsafe {
+            if libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) == -1 {
+                return Err(anyhow::anyhow!("Failed to redirect TTY to stdin"));
             }
         }
     }
 
-    if !stdin_is_terminal && tty_handle.is_none() && std::env::var("JQT_SKIP_TTY_CHECK").is_err() {
+    if !stdin_is_terminal && tty_handle.is_none() && std::env::var("JQPP_SKIP_TTY_CHECK").is_err() {
         return Err(anyhow::anyhow!("No TTY found for interactive mode while stdin is redirected."));
     }
 
@@ -286,7 +284,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
     let mut last_edit_at = Instant::now();
     let mut debounce_pending = false;
 
-    let mut key_log: Option<std::fs::File> = std::env::var("JQT_KEY_LOG").ok().and_then(|path| {
+    let mut key_log: Option<std::fs::File> = std::env::var("JQPP_KEY_LOG").ok().and_then(|path| {
         std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
     });
 
@@ -479,7 +477,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 }
                             } else if is_action(keymap::Action::SaveOutput) {
                                 let output = Executor::format_results(&app.results, app.raw_output);
-                                if std::fs::write("jqt-output.json", output).is_ok() {
+                                if std::fs::write("jqpp-output.json", output).is_ok() {
                                     footer_message = Some(("saved".to_string(), Instant::now()));
                                 }
                             } else if is_action(keymap::Action::AcceptSuggestion) || is_action(keymap::Action::NextPane) {

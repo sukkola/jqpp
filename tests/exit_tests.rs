@@ -18,7 +18,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const BINARY: &str = "target/debug/jqt";
+const BINARY: &str = "target/debug/jqpp";
 const SAMPLE_JSON: &[u8] = br#"{"name":"test","value":42,"nested":{"x":1}}"#;
 
 // ── helpers ───────────────────────────────────────────────────────────────────

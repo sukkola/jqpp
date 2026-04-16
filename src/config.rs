@@ -16,14 +16,14 @@ pub fn resolve_config_path(override_path: Option<&Path>) -> Option<PathBuf> {
     }
 
     if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
-        let path = PathBuf::from(xdg_config).join("jqt/config.toml");
+        let path = PathBuf::from(xdg_config).join("jqpp/config.toml");
         if path.exists() {
             return Some(path);
         }
     }
 
     if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".config/jqt/config.toml");
+        let path = PathBuf::from(home).join(".config/jqpp/config.toml");
         if path.exists() {
             return Some(path);
         }
@@ -54,13 +54,15 @@ pub fn load_keymap(override_path: Option<&Path>) -> (Keymap, Option<String>) {
         None => return (Keymap::default(), None),
     };
 
-    if !path.exists() {
-        return (Keymap::default(), None);
-    }
-
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => return (Keymap::default(), Some(format!("Config read error: {}", e))),
+        Err(e) => {
+            if path.exists() {
+                return (Keymap::default(), Some(format!("Config read error: {}", e)));
+            } else {
+                return (Keymap::default(), None);
+            }
+        }
     };
 
     let config: Config = match toml::from_str(&content) {

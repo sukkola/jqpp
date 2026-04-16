@@ -1,6 +1,6 @@
-# jqt
+# jqpp (jq++)
 
-`jqt` is a Rust TUI for interactively exploring JSON with jq-like queries, powered by [`jaq`](https://github.com/01mf02/jaq). It is inspired by `jqp` but written in Rust with additional features: type-aware completions, format-operator support, and a non-blocking event loop that stays responsive on large inputs.
+`jqpp` is a Rust TUI for interactively exploring JSON with jq-like queries, powered by [`jaq`](https://github.com/01mf02/jaq). It is inspired by `jqp` but written in Rust with additional features: type-aware completions, format-operator support, and a non-blocking event loop that stays responsive on large inputs.
 
 ## Features
 
@@ -21,13 +21,13 @@
 
 ```bash
 # Read from a file
-jqt data.json
+jqpp data.json
 
 # Read from stdin
-cat data.json | jqt
+cat data.json | jqpp
 
 # Enable jq-lsp integration (requires jq-lsp on PATH)
-jqt data.json --lsp
+jqpp data.json --lsp
 ```
 
 ## Keybindings
@@ -44,14 +44,14 @@ jqt data.json --lsp
 | `Ctrl+T` | Toggle query bar visibility |
 | `Ctrl+M` | Toggle side menu |
 | `Ctrl+Y` | Copy focused pane to clipboard (query / raw input / output) |
-| `Ctrl+S` | Save output to `jqt-output.json` |
+| `Ctrl+S` | Save output to `jqpp-output.json` |
 | `q` | Quit (when focus is not on query input) |
 | `Ctrl+C` | Quit from any state |
 
 ## Configuration
 
-`jqt` can be configured via a TOML file. By default, it looks for a file at:
-- Linux/macOS: `~/.config/jqt/config.toml` (or `$XDG_CONFIG_HOME/jqt/config.toml`)
+`jqpp` can be configured via a TOML file. By default, it looks for a file at:
+- Linux/macOS: `~/.config/jqpp/config.toml` (or `$XDG_CONFIG_HOME/jqpp/config.toml`)
 
 ### Example `config.toml`
 
@@ -93,13 +93,13 @@ prev-pane = "Ctrl+Left"
 
 Suggestions appear after typing `.`, `|`, `{`, `[`, `,`, or `@`. They also update as you continue typing a prefix. The dropdown shows up to 11 items at a time and scrolls as you navigate.
 
-**Type-aware filtering**: when your query has a pipe (`|`), `jqt` evaluates the expression before the pipe to determine its runtime type. Only functions compatible with that type are suggested — for example, `ascii_upcase` only appears after a string-producing expression.
+**Type-aware filtering**: when your query has a pipe (`|`), `jqpp` evaluates the expression before the pipe to determine its runtime type. Only functions compatible with that type are suggested — for example, `ascii_upcase` only appears after a string-producing expression.
 
 **Mid-query editing**: if you move your cursor into the middle of an existing query and type, completions are based on the text to the left of the cursor. Accepting a completion preserves whatever was to the right.
 
 ## Format Operators
 
-`jqt` supports `@csv` and `@tsv` even though `jaq` does not implement them natively. The operators are intercepted at the executor level:
+`jqpp` supports `@csv` and `@tsv` even though `jaq` does not implement them natively. The operators are intercepted at the executor level:
 
 ```
 # Produces comma-separated rows
@@ -119,7 +119,7 @@ When active, the footer shows the LSP status. Function signatures and additional
 
 ## Known `jaq` Compatibility Gaps
 
-`jqt` uses `jaq` as its engine. Known unsupported features:
+`jqpp` uses `jaq` as its engine. Known unsupported features:
 
 - `$ENV` — environment variable access
 - `path()` expressions

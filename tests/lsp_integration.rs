@@ -39,13 +39,13 @@ fn recv_rpc(stdout: &mut impl Read) -> serde_json::Value {
     serde_json::from_slice(&body).expect("Invalid JSON in LSP response")
 }
 
-// ── test: initialize handshake via jqt process ───────────────────────────────
+// ── test: initialize handshake via jqpp process ───────────────────────────────
 
 #[test]
 fn test_lsp_integration() {
     // 1. Build everything
     let _ = Command::new("cargo")
-        .args(["build", "--bin", "jqt", "--bin", "mock_lsp"])
+        .args(["build", "--bin", "jqpp", "--bin", "mock_lsp"])
         .status();
 
     let root = env::current_dir().unwrap();
@@ -56,17 +56,17 @@ fn test_lsp_integration() {
         let _ = fs::remove_file(&log_path);
     }
 
-    // 2. Run jqt with mock_lsp
-    let mut child = Command::new(root.join("target/debug/jqt"))
+    // 2. Run jqpp with mock_lsp
+    let mut child = Command::new(root.join("target/debug/jqpp"))
         .arg("--lsp")
-        .env("JQT_LSP_BIN", &mock_lsp_path)
-        .env("JQT_SKIP_TTY_CHECK", "1")
+        .env("JQPP_LSP_BIN", &mock_lsp_path)
+        .env("JQPP_SKIP_TTY_CHECK", "1")
         .env("MOCK_LSP_LOG", &log_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to spawn jqt");
+        .expect("Failed to spawn jqpp");
 
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
     stdin.write_all(b"{}").expect("Failed to write to stdin");
@@ -75,9 +75,9 @@ fn test_lsp_integration() {
     // Wait for LSP handshake
     thread::sleep(Duration::from_millis(2000));
 
-    // Kill jqt
+    // Kill jqpp
     let _ = child.kill();
-    let output = child.wait_with_output().expect("Failed to wait for jqt");
+    let output = child.wait_with_output().expect("Failed to wait for jqpp");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
