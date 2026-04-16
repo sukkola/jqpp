@@ -101,7 +101,8 @@ jobs:
           VERSION_NO_V="${VERSION#v}"
 
           TARBALL_URL="https://github.com/sukkola/jqpp/archive/refs/tags/${VERSION}.tar.gz"
-          SHA=$(curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" "${TARBALL_URL}" | sha256sum | awk '{print $1}')
+          gh release download "${VERSION}" --repo sukkola/jqpp --archive tar.gz --output /tmp/source.tar.gz
+          SHA=$(sha256sum /tmp/source.tar.gz | awk '{print $1}')
 
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/sukkola/homebrew-tap.git" tap
           cd tap
