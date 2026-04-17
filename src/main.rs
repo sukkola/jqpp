@@ -824,13 +824,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                     .executor
                                     .as_ref()
                                     .map(|e| String::from_utf8_lossy(&e.raw_input).into_owned()),
-                                AppState::RightPane => {
-                                    if let Some(ref err) = app.error {
-                                        Some(err.clone())
-                                    } else {
-                                        Some(Executor::format_results(&app.results, app.raw_output))
-                                    }
-                                }
+                                AppState::RightPane => Some(right_pane_copy_text(app)),
                                 AppState::SideMenu => None,
                             };
                             if let Some(t) = text {
@@ -1288,102 +1282,89 @@ async fn main_loop<B: ratatui::backend::Backend>(
             let query = app.query_input.textarea.lines()[0].clone();
             let cursor_col = app.query_input.textarea.cursor().1;
             let query_prefix: String = query.chars().take(cursor_col).collect();
+            let has_non_exact_suggestion = if suggestion_active {
+                app.query_input.suggestions = compute_suggestions(
+                    &query_prefix,
+                    app.executor.as_ref().map(|e| &e.json_input),
+                    &lsp_completions,
+                    cached_pipe_type.as_deref(),
+                );
+                app.query_input.suggestion_index = 0;
+                app.query_input.suggestion_scroll = 0;
+                let all_exact = !app.query_input.suggestions.is_empty()
+                    && app
+                        .query_input
+                        .suggestions
+                        .iter()
+                        .all(|s| s.insert_text == query_prefix);
+                if all_exact {
+                    app.query_input.show_suggestions = false;
+                    suggestion_active = false;
+                    lsp_completions.clear();
+                    cached_pipe_type = None;
+                    false
+                } else {
+                    app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                    has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
+                }
+            } else {
+                false
+            };
+            let hold_output_during_suggestions = suggestion_active
+                && has_non_exact_suggestion
+                && should_hold_output_during_suggestions(&query_prefix);
             let effective_query = if query.trim().is_empty() {
                 ".".to_string()
             } else {
                 query.clone()
             };
 
+            if hold_output_during_suggestions {
+                compute_handle = None;
+            }
+
             if let Some(ref exec) = app.executor {
                 if query_prefix.rfind('|').is_none() {
                     cached_pipe_type = None;
                 }
-                let eq = effective_query.clone();
-                let q = query_prefix.clone();
-                let input = exec.json_input.clone();
-                compute_handle = Some(tokio::task::spawn_blocking(move || {
-                    let main_result = Executor::execute_query(&eq, &input);
-                    let type_query = Executor::strip_format_op(&q)
-                        .map(|(base, _)| base)
-                        .unwrap_or_else(|| q.clone());
-                    let pipe_type = type_query.rfind('|').and_then(|p| {
-                        let prefix = type_query[..p].trim();
-                        if prefix.is_empty() {
-                            return None;
-                        }
-                        Executor::execute(prefix, &input)
-                            .ok()
-                            .and_then(|mut r| {
-                                if r.is_empty() {
-                                    None
-                                } else {
-                                    Some(r.swap_remove(0))
-                                }
-                            })
-                            .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
-                    });
-                    (main_result, pipe_type)
-                }));
-                pending_qp = query_prefix.clone();
-
-                if suggestion_active {
-                    app.query_input.suggestions = compute_suggestions(
-                        &query_prefix,
-                        app.executor.as_ref().map(|e| &e.json_input),
-                        &lsp_completions,
-                        cached_pipe_type.as_deref(),
-                    );
-                    app.query_input.suggestion_index = 0;
-                    app.query_input.suggestion_scroll = 0;
-                    let all_exact = !app.query_input.suggestions.is_empty()
-                        && app
-                            .query_input
-                            .suggestions
-                            .iter()
-                            .all(|s| s.insert_text == query_prefix);
-                    if all_exact {
-                        app.query_input.show_suggestions = false;
-                        suggestion_active = false;
-                        lsp_completions.clear();
-                        cached_pipe_type = None;
-                    } else {
-                        app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
-                    }
+                if !hold_output_during_suggestions {
+                    let eq = effective_query.clone();
+                    let q = query_prefix.clone();
+                    let input = exec.json_input.clone();
+                    compute_handle = Some(tokio::task::spawn_blocking(move || {
+                        let main_result = Executor::execute_query(&eq, &input);
+                        let type_query = Executor::strip_format_op(&q)
+                            .map(|(base, _)| base)
+                            .unwrap_or_else(|| q.clone());
+                        let pipe_type = type_query.rfind('|').and_then(|p| {
+                            let prefix = type_query[..p].trim();
+                            if prefix.is_empty() {
+                                return None;
+                            }
+                            Executor::execute(prefix, &input)
+                                .ok()
+                                .and_then(|mut r| {
+                                    if r.is_empty() {
+                                        None
+                                    } else {
+                                        Some(r.swap_remove(0))
+                                    }
+                                })
+                                .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
+                        });
+                        (main_result, pipe_type)
+                    }));
+                    pending_qp = query_prefix.clone();
                 }
             } else {
                 if query_prefix.rfind('|').is_none() {
                     cached_pipe_type = None;
                 }
-                if suggestion_active {
-                    app.query_input.suggestions = compute_suggestions(
-                        &query_prefix,
-                        None,
-                        &lsp_completions,
-                        cached_pipe_type.as_deref(),
-                    );
-                    app.query_input.suggestion_index = 0;
-                    app.query_input.suggestion_scroll = 0;
-                    let all_exact = !app.query_input.suggestions.is_empty()
-                        && app
-                            .query_input
-                            .suggestions
-                            .iter()
-                            .all(|s| s.insert_text == query_prefix);
-                    if all_exact {
-                        app.query_input.show_suggestions = false;
-                        suggestion_active = false;
-                        lsp_completions.clear();
-                        cached_pipe_type = None;
-                    } else {
-                        app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
-                    }
-                }
             }
 
-            #[allow(clippy::collapsible_if)]
-            if suggestion_active {
-                if let Some(ref lsp) = lsp_provider {
-                    let _ = lsp.did_change(&query).await;
+            if let Some(ref lsp) = lsp_provider {
+                let _ = lsp.did_change(&query).await;
+                if suggestion_active {
                     let _ = lsp.completion(&query).await;
                 }
             }
@@ -1446,6 +1427,34 @@ fn should_ignore_query_input_key(key: &ratatui::crossterm::event::KeyEvent) -> b
             && key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER))
+}
+
+fn should_hold_output_during_suggestions(query_prefix: &str) -> bool {
+    let trimmed = query_prefix.trim_end();
+    let Some(last) = trimmed.chars().last() else {
+        return false;
+    };
+
+    matches!(last, '.' | '|' | '[' | '{' | '(' | ',' | ':')
+        || last.is_ascii_alphanumeric()
+        || matches!(last, '_' | '-' | '@' | '"' | '\'')
+}
+
+fn has_non_exact_suggestion_for_prefix(
+    query_prefix: &str,
+    suggestions: &[widgets::query_input::Suggestion],
+) -> bool {
+    suggestions.iter().any(|s| s.insert_text != query_prefix)
+}
+
+fn right_pane_copy_text(app: &App<'_>) -> String {
+    if !app.results.is_empty() {
+        Executor::format_results(&app.results, app.raw_output)
+    } else if let Some(ref err) = app.error {
+        err.clone()
+    } else {
+        Executor::format_results(&app.results, app.raw_output)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1744,5 +1753,77 @@ mod tests {
         });
 
         assert!(should_drop_boundary_scroll_event(&app, &evt));
+    }
+
+    #[test]
+    fn holds_output_for_partial_suggestion_token() {
+        assert!(should_hold_output_during_suggestions(".items[].na"));
+        assert!(should_hold_output_during_suggestions(".items."));
+    }
+
+    #[test]
+    fn releases_output_for_committed_parent_segment() {
+        assert!(!should_hold_output_during_suggestions(".items[]"));
+        assert!(!should_hold_output_during_suggestions(".items[] | ."));
+    }
+
+    #[test]
+    fn right_pane_copy_prefers_results_over_stale_error() {
+        let mut app = App::new();
+        app.results = vec![serde_json::json!({"name":"alice"})];
+        app.error = Some("Error: unexpected EOF".to_string());
+
+        let copied = right_pane_copy_text(&app);
+
+        assert!(copied.contains("alice"));
+        assert!(!copied.contains("unexpected EOF"));
+    }
+
+    #[test]
+    fn right_pane_copy_uses_error_when_no_results() {
+        let mut app = App::new();
+        app.error = Some("Error: unexpected EOF".to_string());
+
+        let copied = right_pane_copy_text(&app);
+
+        assert_eq!(copied, "Error: unexpected EOF");
+    }
+
+    #[test]
+    fn ui_validation_holds_output_while_backspacing_partial_token() {
+        let suggestions = vec![widgets::query_input::Suggestion {
+            label: ".metadata.exported_at".to_string(),
+            insert_text: ".metadata.exported_at".to_string(),
+        }];
+
+        assert!(has_non_exact_suggestion_for_prefix(
+            ".metadata.exported_a",
+            &suggestions
+        ));
+        assert!(should_hold_output_during_suggestions(
+            ".metadata.exported_a"
+        ));
+    }
+
+    #[test]
+    fn ui_validation_releases_output_when_query_matches_suggestion() {
+        let suggestions = vec![widgets::query_input::Suggestion {
+            label: ".metadata.exported_at".to_string(),
+            insert_text: ".metadata.exported_at".to_string(),
+        }];
+
+        assert!(!has_non_exact_suggestion_for_prefix(
+            ".metadata.exported_at",
+            &suggestions
+        ));
+    }
+
+    #[test]
+    fn ui_validation_does_not_hold_when_no_suggestions() {
+        let suggestions: Vec<widgets::query_input::Suggestion> = Vec::new();
+        assert!(!has_non_exact_suggestion_for_prefix(
+            ".metadata",
+            &suggestions
+        ));
     }
 }
