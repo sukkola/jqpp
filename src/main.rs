@@ -1356,10 +1356,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     }));
                     pending_qp = query_prefix.clone();
                 }
-            } else {
-                if query_prefix.rfind('|').is_none() {
-                    cached_pipe_type = None;
-                }
+            } else if query_prefix.rfind('|').is_none() {
+                cached_pipe_type = None;
             }
 
             if let Some(ref lsp) = lsp_provider {
@@ -1430,11 +1428,14 @@ fn should_ignore_query_input_key(key: &ratatui::crossterm::event::KeyEvent) -> b
 }
 
 fn should_hold_output_during_suggestions(query_prefix: &str) -> bool {
-    let trimmed = query_prefix.trim_end();
-    let Some(last) = trimmed.chars().last() else {
+    let token = current_token(query_prefix).trim_end();
+    // A bare "." is the identity expression — already complete, don't hold.
+    if token == "." {
+        return false;
+    }
+    let Some(last) = token.chars().last() else {
         return false;
     };
-
     matches!(last, '.' | '|' | '[' | '{' | '(' | ',' | ':')
         || last.is_ascii_alphanumeric()
         || matches!(last, '_' | '-' | '@' | '"' | '\'')
@@ -1456,7 +1457,6 @@ fn right_pane_copy_text(app: &App<'_>) -> String {
         Executor::format_results(&app.results, app.raw_output)
     }
 }
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScrollPane {
     Left,

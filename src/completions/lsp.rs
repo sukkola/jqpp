@@ -113,6 +113,12 @@ impl LspProvider {
         }
     }
 
+    pub fn try_send(&self, msg: Value) {
+        if let Some(ref tx) = self.tx {
+            let _ = tx.try_send(msg);
+        }
+    }
+
     pub async fn did_change(&self, text: &str) {
         self.send(json!({
             "jsonrpc": "2.0",
@@ -163,22 +169,23 @@ impl LspProvider {
     }
 
     pub async fn shutdown(&mut self) {
-        self.send(json!({
+        self.try_send(json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "shutdown"
-        }))
-        .await;
-        self.send(json!({
+        }));
+        self.try_send(json!({
             "jsonrpc": "2.0",
             "method": "exit"
-        }))
-        .await;
+        }));
+        // Drop sender so writer task exits promptly and closes stdin.
+        let _ = self.tx.take();
         if let Some(mut child) = self.child.take() {
-            // Give the LSP process 1 s to exit gracefully, then kill it.
-            let timed_out = tokio::time::timeout(std::time::Duration::from_secs(1), child.wait())
-                .await
-                .is_err();
+            // Give the LSP process a short grace period, then kill it.
+            let timed_out =
+                tokio::time::timeout(std::time::Duration::from_millis(150), child.wait())
+                    .await
+                    .is_err();
             if timed_out {
                 let _ = child.kill().await;
             }
