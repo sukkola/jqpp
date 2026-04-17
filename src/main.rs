@@ -1632,7 +1632,10 @@ fn compute_suggestions(
     pipe_context_type: Option<&str>,
 ) -> Vec<widgets::query_input::Suggestion> {
     let token = current_token(query_prefix);
+    let fuzzy_token = fuzzy_token_fragment(token);
+    let fuzzy_token_prefix = fuzzy_token_prefix(token);
     let prefix = lsp_pipe_prefix(query_prefix);
+    let query_before_token = query_prefix.strip_suffix(token).unwrap_or(query_prefix);
 
     let json_completions = if let Some(input) = json_input {
         completions::json_context::get_completions(query_prefix, input)
@@ -1640,14 +1643,40 @@ fn compute_suggestions(
         Vec::new()
     };
 
-    let builtin_completions: Vec<completions::CompletionItem> = {
-        completions::jq_builtins::get_completions(token, pipe_context_type)
+    let with_pipe_prefix = |items: Vec<completions::CompletionItem>| {
+        items
             .into_iter()
             .map(|c| completions::CompletionItem {
                 insert_text: format!("{}{}", prefix, c.insert_text),
                 ..c
             })
-            .collect()
+            .collect::<Vec<_>>()
+    };
+
+    let builtin_completions: Vec<completions::CompletionItem> = with_pipe_prefix(
+        completions::jq_builtins::get_completions(token, pipe_context_type),
+    );
+
+    let all_builtin_completions: Vec<completions::CompletionItem> = with_pipe_prefix(
+        completions::jq_builtins::get_completions("", pipe_context_type),
+    );
+
+    let fuzzy_builtin_completions: Vec<completions::CompletionItem> =
+        if fuzzy_token.is_empty() || !should_offer_builtin_fuzzy(token) {
+            Vec::new()
+        } else {
+            completions::fuzzy::fuzzy_completions(fuzzy_token, &all_builtin_completions)
+        };
+
+    let fuzzy_json_completions: Vec<completions::CompletionItem> = if fuzzy_token.is_empty() {
+        Vec::new()
+    } else if let Some(input) = json_input {
+        let json_context_query = format!("{}{}", query_before_token, fuzzy_token_prefix);
+        let all_json_fields =
+            completions::json_context::get_completions(&json_context_query, input);
+        completions::fuzzy::fuzzy_completions(fuzzy_token, &all_json_fields)
+    } else {
+        Vec::new()
     };
 
     let lsp_patched: Vec<completions::CompletionItem> =
@@ -1655,6 +1684,22 @@ fn compute_suggestions(
 
     let mut merged = json_completions;
     for item in builtin_completions {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.label == item.label)
+        {
+            merged.push(item);
+        }
+    }
+    for item in fuzzy_json_completions {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.label == item.label)
+        {
+            merged.push(item);
+        }
+    }
+    for item in fuzzy_builtin_completions {
         if !merged
             .iter()
             .any(|i: &completions::CompletionItem| i.label == item.label)
@@ -1675,6 +1720,7 @@ fn compute_suggestions(
         .into_iter()
         .map(|i| widgets::query_input::Suggestion {
             label: i.label,
+            detail: i.detail,
             insert_text: i.insert_text,
         })
         .collect()
@@ -1686,6 +1732,23 @@ fn current_token(query: &str) -> &str {
     } else {
         query
     }
+}
+
+fn fuzzy_token_fragment(token: &str) -> &str {
+    token
+        .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .next()
+        .unwrap_or("")
+}
+
+fn fuzzy_token_prefix(token: &str) -> &str {
+    let fragment = fuzzy_token_fragment(token);
+    token.strip_suffix(fragment).unwrap_or(token)
+}
+
+fn should_offer_builtin_fuzzy(token: &str) -> bool {
+    let t = token.trim_start();
+    !t.starts_with('.') && !t.contains('.') && !t.contains('[') && !t.contains('{')
 }
 
 fn lsp_pipe_prefix(query: &str) -> &str {
@@ -1793,6 +1856,7 @@ mod tests {
     fn ui_validation_holds_output_while_backspacing_partial_token() {
         let suggestions = vec![widgets::query_input::Suggestion {
             label: ".metadata.exported_at".to_string(),
+            detail: Some("field".to_string()),
             insert_text: ".metadata.exported_at".to_string(),
         }];
 
@@ -1809,6 +1873,7 @@ mod tests {
     fn ui_validation_releases_output_when_query_matches_suggestion() {
         let suggestions = vec![widgets::query_input::Suggestion {
             label: ".metadata.exported_at".to_string(),
+            detail: Some("field".to_string()),
             insert_text: ".metadata.exported_at".to_string(),
         }];
 
@@ -1825,5 +1890,94 @@ mod tests {
             ".metadata",
             &suggestions
         ));
+    }
+
+    #[test]
+    fn fuzzy_results_appear_with_tilde_detail_when_no_exact_prefix() {
+        let input = serde_json::json!({"customer_name": "alice"});
+        let suggestions = compute_suggestions("up", Some(&input), &[], None);
+
+        assert!(suggestions.iter().any(|s| {
+            s.label == "ascii_upcase" && s.detail.as_deref().is_some_and(|d| d.starts_with('~'))
+        }));
+    }
+
+    #[test]
+    fn exact_results_appear_before_fuzzy_results() {
+        let input = serde_json::json!({});
+        let suggestions = compute_suggestions("st", Some(&input), &[], None);
+
+        let exact_pos = suggestions.iter().position(|s| {
+            s.label == "startswith" && !s.detail.as_deref().unwrap_or("").starts_with('~')
+        });
+        let fuzzy_pos = suggestions.iter().position(|s| {
+            s.label == "tostring" && s.detail.as_deref().is_some_and(|d| d.starts_with('~'))
+        });
+
+        assert!(exact_pos.is_some(), "expected exact prefix builtin");
+        assert!(fuzzy_pos.is_some(), "expected fuzzy builtin");
+        assert!(exact_pos.unwrap() < fuzzy_pos.unwrap());
+    }
+
+    #[test]
+    fn empty_token_produces_no_fuzzy_candidates() {
+        let input = serde_json::json!({"customer_name": "alice"});
+        let suggestions = compute_suggestions(".customer | ", Some(&input), &[], None);
+
+        assert!(
+            suggestions
+                .iter()
+                .all(|s| !s.detail.as_deref().unwrap_or("").starts_with('~'))
+        );
+    }
+
+    #[test]
+    fn fuzzy_json_field_matches_when_query_starts_with_dot() {
+        let input = serde_json::json!({
+            "store_region": "EU-NORTH",
+            "store_name": "Nordic Widgets"
+        });
+
+        let suggestions = compute_suggestions(".egion", Some(&input), &[], None);
+
+        assert!(suggestions.iter().any(|s| {
+            s.label == "store_region" && s.detail.as_deref().is_some_and(|d| d.starts_with('~'))
+        }));
+    }
+
+    #[test]
+    fn fuzzy_json_respects_nested_context_path() {
+        let input = serde_json::json!({
+            "store_name": "Nordic Widgets",
+            "orders": [{
+                "customer": {
+                    "name": "Alice",
+                    "email": "alice@example.com"
+                }
+            }]
+        });
+
+        let suggestions = compute_suggestions(".orders[].customer.ame", Some(&input), &[], None);
+
+        assert!(suggestions.iter().any(|s| {
+            s.label == "name"
+                && s.insert_text == ".orders[].customer.name"
+                && s.detail.as_deref().is_some_and(|d| d.starts_with('~'))
+        }));
+        assert!(!suggestions.iter().any(|s| s.insert_text == ".store_name"));
+    }
+
+    #[test]
+    fn fuzzy_does_not_offer_builtin_functions_in_dot_path_context() {
+        let input = serde_json::json!({
+            "orders": [{
+                "customer": { "name": "Alice" }
+            }]
+        });
+
+        let suggestions = compute_suggestions(".orders[].customer.ame", Some(&input), &[], None);
+
+        assert!(!suggestions.iter().any(|s| s.label == "ascii_upcase"));
+        assert!(!suggestions.iter().any(|s| s.insert_text == "ascii_upcase"));
     }
 }

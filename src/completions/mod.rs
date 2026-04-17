@@ -1,3 +1,4 @@
+pub mod fuzzy;
 pub mod jq_builtins;
 pub mod json_context;
 pub mod lsp;

@@ -8,6 +8,7 @@ use tui_textarea::TextArea;
 #[derive(Clone)]
 pub struct Suggestion {
     pub label: String,
+    pub detail: Option<String>,
     pub insert_text: String,
 }
 
@@ -189,6 +190,7 @@ mod tests {
             .iter()
             .map(|l| Suggestion {
                 label: l.to_string(),
+                detail: None,
                 insert_text: format!(".{}", l),
             })
             .collect();
@@ -298,6 +300,7 @@ mod tests {
         qi.textarea.move_cursor(tui_textarea::CursorMove::End);
         qi.suggestions = vec![Suggestion {
             label: "x".into(),
+            detail: None,
             insert_text: ".x".into(),
         }];
         qi.show_suggestions = true;
