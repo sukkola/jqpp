@@ -171,13 +171,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     );
     if left_content_lines > usize::from(left_pane_height) {
         let left_max_scroll = App::max_scroll_offset(left_content_lines, left_pane_height) as usize;
-        let left_scrollbar_pos = if left_max_scroll == 0 {
-            0
-        } else {
-            usize::from(app.left_scroll).saturating_mul(left_content_lines.saturating_sub(1))
-                / left_max_scroll
-        }
-        .min(left_content_lines.saturating_sub(1));
+        let left_scrollbar_pos = usize::from(app.left_scroll)
+            .saturating_mul(left_content_lines.saturating_sub(1))
+            .checked_div(left_max_scroll)
+            .unwrap_or(0)
+            .min(left_content_lines.saturating_sub(1));
         let mut left_scrollbar_state = ScrollbarState::new(left_content_lines)
             .viewport_content_length(usize::from(left_pane_height))
             .position(left_scrollbar_pos);
@@ -249,13 +247,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     if right_content_lines > usize::from(right_pane_height) {
         let right_max_scroll =
             App::max_scroll_offset(right_content_lines, right_pane_height) as usize;
-        let right_scrollbar_pos = if right_max_scroll == 0 {
-            0
-        } else {
-            usize::from(app.right_scroll).saturating_mul(right_content_lines.saturating_sub(1))
-                / right_max_scroll
-        }
-        .min(right_content_lines.saturating_sub(1));
+        let right_scrollbar_pos = usize::from(app.right_scroll)
+            .saturating_mul(right_content_lines.saturating_sub(1))
+            .checked_div(right_max_scroll)
+            .unwrap_or(0)
+            .min(right_content_lines.saturating_sub(1));
         let mut right_scrollbar_state = ScrollbarState::new(right_content_lines)
             .viewport_content_length(usize::from(right_pane_height))
             .position(right_scrollbar_pos);
