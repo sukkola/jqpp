@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
       - name: Rust Cache
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run tests
