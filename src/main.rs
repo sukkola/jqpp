@@ -8,6 +8,11 @@ use jqpp::ui;
 use jqpp::widgets;
 
 use anyhow::{Context, Result};
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+use arboard::SetExtLinux;
 use clap::Parser;
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
@@ -249,6 +254,31 @@ fn get_tty_handle() -> Option<std::fs::File> {
         }
     }
     None
+}
+
+fn copy_text_to_clipboard(text: String) {
+    std::thread::spawn(move || {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return;
+        };
+
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+        ))]
+        {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            let _ = clipboard.set().wait_until(deadline).text(text);
+        }
+
+        #[cfg(not(all(
+            unix,
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+        )))]
+        {
+            let _ = clipboard.set_text(text);
+        }
+    });
 }
 
 fn actual_main(args: Args) -> Result<()> {
@@ -572,11 +602,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                             AppState::SideMenu => None,
                         };
                         if let Some(t) = text {
-                            std::thread::spawn(move || {
-                                if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(t);
-                                }
-                            });
+                            copy_text_to_clipboard(t);
                             footer_message = Some(("copied".to_string(), Instant::now()));
                         }
                         continue;
