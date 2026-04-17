@@ -1834,6 +1834,10 @@ fn compute_suggestions(
     lsp_completions: &[completions::CompletionItem],
     pipe_context_type: Option<&str>,
 ) -> Vec<widgets::query_input::Suggestion> {
+    if is_inside_string_literal(query_prefix) {
+        return Vec::new();
+    }
+
     let token = current_token(query_prefix);
     let fuzzy_token = fuzzy_token_fragment(token);
     let fuzzy_token_prefix = fuzzy_token_prefix(token);
@@ -1927,6 +1931,31 @@ fn compute_suggestions(
             insert_text: i.insert_text,
         })
         .collect()
+}
+
+fn is_inside_string_literal(query: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in query.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        match quote {
+            Some(open) if ch == open => quote = None,
+            None if matches!(ch, '"' | '\'') => quote = Some(ch),
+            _ => {}
+        }
+    }
+
+    quote.is_some()
 }
 
 fn current_token(query: &str) -> &str {
@@ -2182,6 +2211,24 @@ mod tests {
 
         assert!(!suggestions.iter().any(|s| s.label == "ascii_upcase"));
         assert!(!suggestions.iter().any(|s| s.insert_text == "ascii_upcase"));
+    }
+
+    #[test]
+    fn suggestions_are_suppressed_inside_function_string_arguments() {
+        let input = serde_json::json!("alice");
+
+        let suggestions = compute_suggestions("startswith(\"b", Some(&input), &[], Some("string"));
+
+        assert!(
+            suggestions.is_empty(),
+            "no completions should appear while editing inside quoted function arguments"
+        );
+    }
+
+    #[test]
+    fn string_literal_detection_handles_escaped_quotes() {
+        assert!(is_inside_string_literal("startswith(\"a\\\"b"));
+        assert!(!is_inside_string_literal("startswith(\"a\\\"b\")"));
     }
 
     #[test]
