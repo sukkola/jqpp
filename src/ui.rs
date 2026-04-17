@@ -9,6 +9,21 @@ use ratatui::{
     },
 };
 
+fn wrapped_line_count(content: &str, width: u16) -> usize {
+    let width = usize::from(width);
+    if width == 0 || content.is_empty() {
+        return 0;
+    }
+
+    content
+        .split('\n')
+        .map(|line| {
+            let chars = line.chars().count().max(1);
+            chars.div_ceil(width)
+        })
+        .sum()
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     let constraints = if app.query_bar_visible {
         vec![
@@ -121,12 +136,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     } else {
         "No input data".to_string()
     };
-    let left_content_lines = if left_content.is_empty() {
-        0
-    } else {
-        left_content.split('\n').count()
-    };
-
     let left_style = if matches!(app.state, AppState::LeftPane) {
         Style::default()
             .fg(Color::Yellow)
@@ -143,7 +152,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
         horizontal: 1,
         vertical: 0,
     });
+    let left_content_width = left_inner_rect.width.saturating_sub(2);
     let left_pane_height = left_pane_rect.height.saturating_sub(2);
+    let left_content_lines = wrapped_line_count(&left_content, left_content_width);
     app.left_pane_height = left_pane_height;
     app.left_content_lines = left_content_lines;
     app.left_scrollbar_col = left_pane_rect
@@ -197,12 +208,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     } else {
         crate::executor::Executor::format_results(&app.results, app.raw_output)
     };
-    let right_content_lines = if right_content.is_empty() {
-        0
-    } else {
-        right_content.split('\n').count()
-    };
-
     let right_style = if matches!(app.state, AppState::RightPane) {
         Style::default()
             .fg(Color::Yellow)
@@ -224,7 +229,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
         horizontal: 1,
         vertical: 0,
     });
+    let right_content_width = right_inner_rect.width.saturating_sub(2);
     let right_pane_height = right_pane_rect.height.saturating_sub(2);
+    let right_content_lines = wrapped_line_count(&right_content, right_content_width);
     app.right_pane_height = right_pane_height;
     app.right_content_lines = right_content_lines;
     app.right_scrollbar_col = right_pane_rect
@@ -347,6 +354,12 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn wrapped_line_count_expands_long_lines() {
+        assert_eq!(wrapped_line_count("abcdefghi", 4), 3);
+        assert_eq!(wrapped_line_count("abc\n\ndef", 4), 3);
+    }
+
     // ── Structural rendering ──────────────────────────────────────────────────
 
     #[test]
@@ -409,6 +422,29 @@ mod tests {
     }
 
     #[test]
+    fn input_pane_scroll_reaches_wrapped_bottom() {
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: b"{\n\"products\": [\"alpha-beta-gamma-delta\", \"epsilon-zeta-eta-theta\"],\n\"tail\": \"BOTTOM_MARKER\"\n}".to_vec(),
+            json_input: json!({
+                "products": ["alpha-beta-gamma-delta", "epsilon-zeta-eta-theta"],
+                "tail": "BOTTOM_MARKER"
+            }),
+            source_label: "test".to_string(),
+        });
+
+        let _ = render(&mut app, 24, 10);
+        app.left_scroll = app.max_left_scroll();
+        let buf = render(&mut app, 24, 10);
+        let left = region(&buf, 0, 4, 12, 9);
+
+        assert!(
+            left.contains("BOTTOM"),
+            "left pane should reach wrapped bottom content, got:\n{left}"
+        );
+    }
+
+    #[test]
     fn output_pane_renders_results() {
         let mut app = App::new();
         app.results = vec![json!("hello"), json!(42)];
@@ -436,6 +472,25 @@ mod tests {
             right.contains("compile error"),
             "Error must appear in output pane: {}",
             right
+        );
+    }
+
+    #[test]
+    fn output_pane_scroll_reaches_wrapped_bottom() {
+        let mut app = App::new();
+        app.results = vec![json!({
+            "products": ["alpha-beta-gamma-delta", "epsilon-zeta-eta-theta"],
+            "tail": "BOTTOM_MARKER"
+        })];
+
+        let _ = render(&mut app, 24, 10);
+        app.right_scroll = app.max_right_scroll();
+        let buf = render(&mut app, 24, 10);
+        let right = region(&buf, 12, 4, 24, 9);
+
+        assert!(
+            right.contains("BOTTOM"),
+            "right pane should reach wrapped bottom content, got:\n{right}"
         );
     }
 
