@@ -58,7 +58,6 @@ fn test_lsp_integration() {
 
     // 2. Run jqpp with mock_lsp
     let mut child = Command::new(root.join("target/debug/jqpp"))
-        .arg("--lsp")
         .env("JQPP_LSP_BIN", &mock_lsp_path)
         .env("JQPP_SKIP_TTY_CHECK", "1")
         .env("MOCK_LSP_LOG", &log_path)
