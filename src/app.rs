@@ -9,12 +9,27 @@ pub enum AppState {
     SideMenu,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragTarget {
+    LeftScrollbar,
+    RightScrollbar,
+}
+
 pub struct App<'a> {
     pub state: AppState,
     pub running: bool,
     pub executor: Option<Executor>,
     pub left_scroll: u16,
     pub right_scroll: u16,
+    pub left_pane_height: u16,
+    pub right_pane_height: u16,
+    pub left_content_lines: usize,
+    pub right_content_lines: usize,
+    pub left_scrollbar_col: u16,
+    pub right_scrollbar_col: u16,
+    pub left_pane_top: u16,
+    pub right_pane_top: u16,
+    pub drag_target: Option<DragTarget>,
     pub results: Vec<serde_json::Value>,
     pub error: Option<String>,
     pub query_bar_visible: bool,
@@ -42,6 +57,15 @@ impl<'a> App<'a> {
             executor: None,
             left_scroll: 0,
             right_scroll: 0,
+            left_pane_height: 20,
+            right_pane_height: 20,
+            left_content_lines: 0,
+            right_content_lines: 0,
+            left_scrollbar_col: 0,
+            right_scrollbar_col: 0,
+            left_pane_top: 0,
+            right_pane_top: 0,
+            drag_target: None,
             results: Vec::new(),
             error: None,
             query_bar_visible: true,
@@ -84,6 +108,49 @@ impl<'a> App<'a> {
             AppState::RightPane => AppState::LeftPane,
             AppState::SideMenu => AppState::QueryInput,
         };
+    }
+
+    pub fn max_scroll_offset(content_lines: usize, pane_height: u16) -> u16 {
+        content_lines.saturating_sub(usize::from(pane_height)) as u16
+    }
+
+    pub fn max_left_scroll(&self) -> u16 {
+        Self::max_scroll_offset(self.left_content_lines, self.left_pane_height)
+    }
+
+    pub fn max_right_scroll(&self) -> u16 {
+        Self::max_scroll_offset(self.right_content_lines, self.right_pane_height)
+    }
+
+    pub fn clamp_left_scroll(&mut self) {
+        self.left_scroll = self.left_scroll.min(self.max_left_scroll());
+    }
+
+    pub fn clamp_right_scroll(&mut self) {
+        self.right_scroll = self.right_scroll.min(self.max_right_scroll());
+    }
+
+    pub fn scroll_offset_from_row(
+        row: u16,
+        pane_top: u16,
+        pane_height: u16,
+        content_lines: usize,
+    ) -> u16 {
+        if pane_height == 0 || content_lines == 0 {
+            return 0;
+        }
+
+        let max = Self::max_scroll_offset(content_lines, pane_height);
+        if pane_height <= 1 || max == 0 {
+            return 0;
+        }
+
+        let relative_row = row
+            .saturating_sub(pane_top)
+            .min(pane_height.saturating_sub(1));
+        let proportional =
+            (u32::from(relative_row) * u32::from(max)) / u32::from(pane_height.saturating_sub(1));
+        (proportional as u16).min(max)
     }
 }
 
@@ -147,5 +214,71 @@ mod tests {
         app.error = Some("parse error".to_string());
         // No right_scroll reset — it stays at 3
         assert_eq!(app.right_scroll, 3);
+    }
+
+    #[test]
+    fn scroll_page_down_clamps_to_max() {
+        let mut app = App::new();
+        app.right_pane_height = 10;
+        app.right_content_lines = 23;
+        let max = app.max_right_scroll();
+
+        app.right_scroll = app
+            .right_scroll
+            .saturating_add(app.right_pane_height)
+            .min(max);
+        app.right_scroll = app
+            .right_scroll
+            .saturating_add(app.right_pane_height)
+            .min(max);
+        app.right_scroll = app
+            .right_scroll
+            .saturating_add(app.right_pane_height)
+            .min(max);
+
+        assert_eq!(app.right_scroll, 13);
+        assert_eq!(app.right_scroll, max);
+    }
+
+    #[test]
+    fn scroll_to_top_sets_zero() {
+        let mut app = App::new();
+        app.left_scroll = 8;
+
+        app.left_scroll = 0;
+
+        assert_eq!(app.left_scroll, 0);
+    }
+
+    #[test]
+    fn scroll_to_bottom_uses_max_offset() {
+        let mut app = App::new();
+        app.right_pane_height = 7;
+        app.right_content_lines = 30;
+
+        app.right_scroll = app.max_right_scroll();
+
+        assert_eq!(app.right_scroll, 23);
+    }
+
+    #[test]
+    fn max_scroll_uses_content_lines_and_pane_height() {
+        let mut app = App::new();
+        app.right_content_lines = 17;
+        app.right_pane_height = 5;
+
+        assert_eq!(app.max_right_scroll(), 12);
+    }
+
+    #[test]
+    fn scroll_offset_from_row_reaches_max_at_bottom_row() {
+        let pane_height = 10;
+        let content_lines = 40;
+        let pane_top = 4;
+        let bottom_row = pane_top + pane_height - 1;
+
+        let offset = App::scroll_offset_from_row(bottom_row, pane_top, pane_height, content_lines);
+
+        assert_eq!(offset, App::max_scroll_offset(content_lines, pane_height));
     }
 }

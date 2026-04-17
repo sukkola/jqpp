@@ -58,6 +58,10 @@ jqpp data.json --no-lsp
 | `Shift+Tab` | Cycle focus to previous pane |
 | `Down` | Move completion selection down; open dropdown from cache |
 | `Up` | Move completion selection up; navigate query history |
+| `Page Down` | Scroll focused input/output pane down by one viewport |
+| `Page Up` | Scroll focused input/output pane up by one viewport |
+| `Home` | Jump focused input/output pane to top |
+| `End` | Jump focused input/output pane to bottom |
 | `Esc` | Dismiss completion dropdown |
 | `Esc Esc` | Clear the query bar (double-press within 500ms) |
 | `Ctrl+T` | Toggle query bar visibility |
@@ -66,6 +70,8 @@ jqpp data.json --no-lsp
 | `Ctrl+S` | Save output to `jqpp-output.json` |
 | `q` | Quit (when focus is not on query input) |
 | `Ctrl+C` | Quit from any state |
+
+Input and output panes also support scrollbar interaction with the mouse: use wheel/trackpad over the pane under the pointer, or click and drag directly on the pane scrollbar.
 
 ## Configuration
 

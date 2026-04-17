@@ -19,6 +19,10 @@ pub enum Action {
     SuggestionDown,
     ScrollUp,
     ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollToTop,
+    ScrollToBottom,
 }
 
 impl Action {
@@ -39,6 +43,10 @@ impl Action {
             Action::SuggestionDown,
             Action::ScrollUp,
             Action::ScrollDown,
+            Action::ScrollPageUp,
+            Action::ScrollPageDown,
+            Action::ScrollToTop,
+            Action::ScrollToBottom,
         ]
     }
 
@@ -59,6 +67,10 @@ impl Action {
             Action::SuggestionDown => "suggestion-down",
             Action::ScrollUp => "scroll-up",
             Action::ScrollDown => "scroll-down",
+            Action::ScrollPageUp => "scroll-page-up",
+            Action::ScrollPageDown => "scroll-page-down",
+            Action::ScrollToTop => "scroll-to-top",
+            Action::ScrollToBottom => "scroll-to-bottom",
         }
     }
 
@@ -79,6 +91,10 @@ impl Action {
             "suggestion-down" => Some(Action::SuggestionDown),
             "scroll-up" => Some(Action::ScrollUp),
             "scroll-down" => Some(Action::ScrollDown),
+            "scroll-page-up" => Some(Action::ScrollPageUp),
+            "scroll-page-down" => Some(Action::ScrollPageDown),
+            "scroll-to-top" => Some(Action::ScrollToTop),
+            "scroll-to-bottom" => Some(Action::ScrollToBottom),
             _ => None,
         }
     }
@@ -134,6 +150,10 @@ impl fmt::Display for KeyBinding {
             KeyCode::Right => write!(f, "Right"),
             KeyCode::Backspace => write!(f, "Backspace"),
             KeyCode::Delete => write!(f, "Delete"),
+            KeyCode::PageUp => write!(f, "PageUp"),
+            KeyCode::PageDown => write!(f, "PageDown"),
+            KeyCode::Home => write!(f, "Home"),
+            KeyCode::End => write!(f, "End"),
             KeyCode::F(n) => write!(f, "F{}", n),
             _ => write!(f, "{:?}", self.code),
         }
@@ -204,6 +224,22 @@ impl Keymap {
         m.insert(
             Action::ScrollDown,
             KeyBinding::new(KeyCode::Char('j'), KeyModifiers::empty()),
+        );
+        m.insert(
+            Action::ScrollPageUp,
+            KeyBinding::new(KeyCode::PageUp, KeyModifiers::empty()),
+        );
+        m.insert(
+            Action::ScrollPageDown,
+            KeyBinding::new(KeyCode::PageDown, KeyModifiers::empty()),
+        );
+        m.insert(
+            Action::ScrollToTop,
+            KeyBinding::new(KeyCode::Home, KeyModifiers::empty()),
+        );
+        m.insert(
+            Action::ScrollToBottom,
+            KeyBinding::new(KeyCode::End, KeyModifiers::empty()),
         );
         m
     }
@@ -298,6 +334,10 @@ pub fn parse_key_binding(s: &str) -> Result<KeyBinding, String> {
         "right" => KeyCode::Right,
         "backspace" => KeyCode::Backspace,
         "delete" => KeyCode::Delete,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
         s if s.starts_with('f') && s[1..].parse::<u8>().is_ok() => {
             KeyCode::F(s[1..].parse::<u8>().unwrap())
         }
@@ -332,6 +372,14 @@ mod tests {
         assert_eq!(
             parse_key_binding("Shift+Up").unwrap(),
             KeyBinding::new(KeyCode::Up, KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            parse_key_binding("PageDown").unwrap(),
+            KeyBinding::new(KeyCode::PageDown, KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key_binding("Home").unwrap(),
+            KeyBinding::new(KeyCode::Home, KeyModifiers::empty())
         );
         assert_eq!(
             parse_key_binding("Ctrl+Shift+s").unwrap(),

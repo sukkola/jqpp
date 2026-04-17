@@ -1,9 +1,12 @@
 use crate::app::{App, AppState};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Margin},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 
 pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
@@ -118,6 +121,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     } else {
         "No input data".to_string()
     };
+    let left_content_lines = if left_content.is_empty() {
+        0
+    } else {
+        left_content.split('\n').count()
+    };
 
     let left_style = if matches!(app.state, AppState::LeftPane) {
         Style::default()
@@ -130,13 +138,44 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
         .title(" Input ")
         .borders(Borders::ALL)
         .border_style(left_style);
+    let left_pane_rect = left_outer_chunks[0];
+    let left_inner_rect = left_pane_rect.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let left_pane_height = left_pane_rect.height.saturating_sub(2);
+    app.left_pane_height = left_pane_height;
+    app.left_content_lines = left_content_lines;
+    app.left_scrollbar_col = left_pane_rect
+        .x
+        .saturating_add(left_pane_rect.width.saturating_sub(1));
+    app.left_pane_top = left_pane_rect.y.saturating_add(1);
+    app.clamp_left_scroll();
     frame.render_widget(
         Paragraph::new(left_content)
             .block(left_block)
             .scroll((app.left_scroll, 0))
             .wrap(Wrap { trim: false }),
-        left_outer_chunks[0],
+        left_inner_rect,
     );
+    if left_content_lines > usize::from(left_pane_height) {
+        let left_max_scroll = App::max_scroll_offset(left_content_lines, left_pane_height) as usize;
+        let left_scrollbar_pos = if left_max_scroll == 0 {
+            0
+        } else {
+            usize::from(app.left_scroll).saturating_mul(left_content_lines.saturating_sub(1))
+                / left_max_scroll
+        }
+        .min(left_content_lines.saturating_sub(1));
+        let mut left_scrollbar_state = ScrollbarState::new(left_content_lines)
+            .viewport_content_length(usize::from(left_pane_height))
+            .position(left_scrollbar_pos);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            left_pane_rect,
+            &mut left_scrollbar_state,
+        );
+    }
 
     let left_status = if let Some(ref exec) = app.executor {
         exec.status_line()
@@ -158,6 +197,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     } else {
         crate::executor::Executor::format_results(&app.results, app.raw_output)
     };
+    let right_content_lines = if right_content.is_empty() {
+        0
+    } else {
+        right_content.split('\n').count()
+    };
 
     let right_style = if matches!(app.state, AppState::RightPane) {
         Style::default()
@@ -175,13 +219,45 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
         } else {
             Style::default()
         });
+    let right_pane_rect = right_outer_chunks[0];
+    let right_inner_rect = right_pane_rect.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let right_pane_height = right_pane_rect.height.saturating_sub(2);
+    app.right_pane_height = right_pane_height;
+    app.right_content_lines = right_content_lines;
+    app.right_scrollbar_col = right_pane_rect
+        .x
+        .saturating_add(right_pane_rect.width.saturating_sub(1));
+    app.right_pane_top = right_pane_rect.y.saturating_add(1);
+    app.clamp_right_scroll();
     frame.render_widget(
         Paragraph::new(right_content)
             .block(right_block)
             .scroll((app.right_scroll, 0))
             .wrap(Wrap { trim: false }),
-        right_outer_chunks[0],
+        right_inner_rect,
     );
+    if right_content_lines > usize::from(right_pane_height) {
+        let right_max_scroll =
+            App::max_scroll_offset(right_content_lines, right_pane_height) as usize;
+        let right_scrollbar_pos = if right_max_scroll == 0 {
+            0
+        } else {
+            usize::from(app.right_scroll).saturating_mul(right_content_lines.saturating_sub(1))
+                / right_max_scroll
+        }
+        .min(right_content_lines.saturating_sub(1));
+        let mut right_scrollbar_state = ScrollbarState::new(right_content_lines)
+            .viewport_content_length(usize::from(right_pane_height))
+            .position(right_scrollbar_pos);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            right_pane_rect,
+            &mut right_scrollbar_state,
+        );
+    }
 
     let right_status = format!("{} results", app.results.len());
     frame.render_widget(Paragraph::new(right_status), right_outer_chunks[1]);
@@ -477,5 +553,98 @@ mod tests {
             "Footer must show key hints: {}",
             footer
         );
+    }
+
+    #[test]
+    fn left_scrollbar_thumb_touches_bottom_arrow_at_max_scroll() {
+        let mut app = App::new();
+        let left_text = (0..80)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.executor = Some(Executor {
+            raw_input: left_text.into_bytes(),
+            json_input: json!({}),
+            source_label: "test".to_string(),
+        });
+
+        let _ = render(&mut app, 100, 28);
+        app.left_scroll = app.max_left_scroll();
+        let buf = render(&mut app, 100, 28);
+
+        let x = app.left_scrollbar_col;
+        let arrow_bottom_y = app.left_pane_top + app.left_pane_height;
+        let thumb_bottom_y = arrow_bottom_y.saturating_sub(1);
+
+        let arrow = buf.cell((x, arrow_bottom_y)).unwrap().symbol();
+        let thumb = buf.cell((x, thumb_bottom_y)).unwrap().symbol();
+
+        assert_eq!(arrow, "▼", "expected bottom arrow at end of track");
+        assert_eq!(thumb, "█", "thumb must touch row above bottom arrow");
+    }
+
+    #[test]
+    fn left_scrollbar_thumb_touches_top_arrow_at_min_scroll() {
+        let mut app = App::new();
+        let left_text = (0..80)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.executor = Some(Executor {
+            raw_input: left_text.into_bytes(),
+            json_input: json!({}),
+            source_label: "test".to_string(),
+        });
+
+        app.left_scroll = 0;
+        let buf = render(&mut app, 100, 28);
+
+        let x = app.left_scrollbar_col;
+        let arrow_top_y = app.left_pane_top.saturating_sub(1);
+        let thumb_top_y = app.left_pane_top;
+
+        let arrow = buf.cell((x, arrow_top_y)).unwrap().symbol();
+        let thumb = buf.cell((x, thumb_top_y)).unwrap().symbol();
+
+        assert_eq!(arrow, "▲", "expected top arrow at start of track");
+        assert_eq!(thumb, "█", "thumb must touch row below top arrow");
+    }
+
+    #[test]
+    fn right_scrollbar_thumb_touches_bottom_arrow_at_max_scroll() {
+        let mut app = App::new();
+        app.results = (0..120).map(|i| json!({"idx": i})).collect();
+
+        let _ = render(&mut app, 100, 28);
+        app.right_scroll = app.max_right_scroll();
+        let buf = render(&mut app, 100, 28);
+
+        let x = app.right_scrollbar_col;
+        let arrow_bottom_y = app.right_pane_top + app.right_pane_height;
+        let thumb_bottom_y = arrow_bottom_y.saturating_sub(1);
+
+        let arrow = buf.cell((x, arrow_bottom_y)).unwrap().symbol();
+        let thumb = buf.cell((x, thumb_bottom_y)).unwrap().symbol();
+
+        assert_eq!(arrow, "▼", "expected bottom arrow at end of track");
+        assert_eq!(thumb, "█", "thumb must touch row above bottom arrow");
+    }
+
+    #[test]
+    fn right_scrollbar_thumb_touches_top_arrow_at_min_scroll() {
+        let mut app = App::new();
+        app.results = (0..120).map(|i| json!({"idx": i})).collect();
+        app.right_scroll = 0;
+        let buf = render(&mut app, 100, 28);
+
+        let x = app.right_scrollbar_col;
+        let arrow_top_y = app.right_pane_top.saturating_sub(1);
+        let thumb_top_y = app.right_pane_top;
+
+        let arrow = buf.cell((x, arrow_top_y)).unwrap().symbol();
+        let thumb = buf.cell((x, thumb_top_y)).unwrap().symbol();
+
+        assert_eq!(arrow, "▲", "expected top arrow at start of track");
+        assert_eq!(thumb, "█", "thumb must touch row below top arrow");
     }
 }
