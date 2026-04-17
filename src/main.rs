@@ -592,6 +592,14 @@ async fn main_loop<B: ratatui::backend::Backend>(
                     } else {
                         app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
                     }
+                    app.structural_hint_active = false;
+                } else {
+                    let query_prefix = current_query_prefix(app);
+                    if !maybe_activate_structural_hint(app, &query_prefix) {
+                        app.structural_hint_active = false;
+                        app.query_input.show_suggestions = false;
+                        app.query_input.suggestions.clear();
+                    }
                 }
             }
         }
@@ -899,7 +907,56 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 } else if is_action(keymap::Action::AcceptSuggestion)
                                     || is_action(keymap::Action::NextPane)
                                 {
-                                    if app.query_input.show_suggestions
+                                    if is_action(keymap::Action::AcceptSuggestion)
+                                        && app.structural_hint_active
+                                        && !app.query_input.suggestions.is_empty()
+                                    {
+                                        let suggestion = app.query_input.suggestions[0].clone();
+                                        let cur = app.query_input.textarea.cursor().1;
+                                        let full = app.query_input.textarea.lines()[0].clone();
+                                        let suffix: String = full.chars().skip(cur).collect();
+                                        let new_text =
+                                            format!("{}{}", suggestion.insert_text, suffix);
+                                        let col = cursor_col_after_accept(&suggestion.insert_text);
+                                        app.query_input.textarea =
+                                            tui_textarea::TextArea::from(vec![new_text]);
+                                        app.query_input.textarea.set_block(
+                                            ratatui::widgets::Block::default()
+                                                .title(" Query ")
+                                                .borders(ratatui::widgets::Borders::ALL),
+                                        );
+                                        app.query_input
+                                            .textarea
+                                            .set_cursor_line_style(ratatui::style::Style::default());
+                                        app.query_input
+                                            .textarea
+                                            .move_cursor(tui_textarea::CursorMove::Jump(0, col));
+
+                                        app.structural_hint_active = false;
+                                        app.query_input.show_suggestions = false;
+
+                                        if suggestion.label == "." {
+                                            let query_prefix = current_query_prefix(app);
+                                            app.query_input.suggestions = compute_suggestions(
+                                                &query_prefix,
+                                                app.executor.as_ref().map(|e| &e.json_input),
+                                                &lsp_completions,
+                                                cached_pipe_type.as_deref(),
+                                            );
+                                            app.query_input.suggestion_index = 0;
+                                            app.query_input.suggestion_scroll = 0;
+                                            app.query_input.show_suggestions =
+                                                !app.query_input.suggestions.is_empty();
+                                            suggestion_active = app.query_input.show_suggestions;
+                                        } else {
+                                            suggestion_active = false;
+                                        }
+
+                                        let new_query = app.query_input.textarea.lines()[0].clone();
+                                        clear_dismissed_hint_if_query_changed(app, &new_query);
+                                        last_edit_at = Instant::now() - debounce_duration;
+                                        debounce_pending = true;
+                                    } else if app.query_input.show_suggestions
                                         && !app.query_input.suggestions.is_empty()
                                         && is_action(keymap::Action::AcceptSuggestion)
                                     {
@@ -941,6 +998,20 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 } else if is_action(keymap::Action::SuggestionUp)
                                     || is_action(keymap::Action::HistoryUp)
                                 {
+                                    if app.structural_hint_active
+                                        && is_action(keymap::Action::SuggestionUp)
+                                    {
+                                        let query_prefix = current_query_prefix(app);
+                                        open_suggestions_from_structural_hint(
+                                            app,
+                                            &query_prefix,
+                                            &lsp_completions,
+                                            cached_pipe_type.as_deref(),
+                                            &mut suggestion_active,
+                                            true,
+                                        );
+                                        continue;
+                                    }
                                     if app.query_input.show_suggestions
                                         && is_action(keymap::Action::SuggestionUp)
                                     {
@@ -968,6 +1039,20 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 } else if is_action(keymap::Action::SuggestionDown)
                                     || is_action(keymap::Action::HistoryDown)
                                 {
+                                    if app.structural_hint_active
+                                        && is_action(keymap::Action::SuggestionDown)
+                                    {
+                                        let query_prefix = current_query_prefix(app);
+                                        open_suggestions_from_structural_hint(
+                                            app,
+                                            &query_prefix,
+                                            &lsp_completions,
+                                            cached_pipe_type.as_deref(),
+                                            &mut suggestion_active,
+                                            false,
+                                        );
+                                        continue;
+                                    }
                                     if app.query_input.show_suggestions
                                         && is_action(keymap::Action::SuggestionDown)
                                     {
@@ -981,6 +1066,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         || is_action(keymap::Action::SuggestionDown)
                                     {
                                         suggestion_active = true;
+                                        app.structural_hint_active = false;
                                         if !app.query_input.suggestions.is_empty() {
                                             app.query_input.show_suggestions = true;
                                             app.query_input.suggestion_index = 0;
@@ -991,9 +1077,15 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         }
                                     }
                                 } else if key.code == KeyCode::Esc {
-                                    if app.query_input.show_suggestions {
+                                    let query_prefix = current_query_prefix(app);
+                                    if app.structural_hint_active {
+                                        dismiss_structural_hint(app, &query_prefix);
+                                        suggestion_active = false;
+                                        last_esc_at = Some(Instant::now());
+                                    } else if app.query_input.show_suggestions {
                                         app.query_input.show_suggestions = false;
                                         suggestion_active = false;
+                                        app.structural_hint_active = false;
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_esc_at = Some(Instant::now());
@@ -1011,6 +1103,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         app.query_input.textarea = new_ta;
                                         app.query_input.show_suggestions = false;
                                         suggestion_active = false;
+                                        app.structural_hint_active = false;
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_esc_at = None;
@@ -1044,6 +1137,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         | KeyCode::Char(',')
                                         | KeyCode::Char('@') => {
                                             suggestion_active = true;
+                                            app.structural_hint_active = false;
                                         }
                                         KeyCode::Char(c)
                                             if c.is_alphanumeric()
@@ -1052,12 +1146,16 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                                 || c == ' ' => {}
                                         KeyCode::Backspace | KeyCode::Delete => {
                                             suggestion_active = true;
+                                            app.structural_hint_active = false;
                                         }
                                         _ => {
                                             suggestion_active = false;
+                                            app.structural_hint_active = false;
                                             app.query_input.show_suggestions = false;
                                         }
                                     }
+                                    let new_query = app.query_input.textarea.lines()[0].clone();
+                                    clear_dismissed_hint_if_query_changed(app, &new_query);
                                 }
                             }
                             AppState::SideMenu => {
@@ -1181,8 +1279,11 @@ async fn main_loop<B: ratatui::backend::Backend>(
                             }
                             app.query_input.show_suggestions = false;
                             suggestion_active = false;
+                            app.structural_hint_active = false;
                             lsp_completions.clear();
                             cached_pipe_type = None;
+                            let new_query = app.query_input.textarea.lines()[0].clone();
+                            clear_dismissed_hint_if_query_changed(app, &new_query);
                             last_edit_at = Instant::now();
                             debounce_pending = true;
                         }
@@ -1283,6 +1384,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
             let cursor_col = app.query_input.textarea.cursor().1;
             let query_prefix: String = query.chars().take(cursor_col).collect();
             let has_non_exact_suggestion = if suggestion_active {
+                app.structural_hint_active = false;
                 app.query_input.suggestions = compute_suggestions(
                     &query_prefix,
                     app.executor.as_ref().map(|e| &e.json_input),
@@ -1457,6 +1559,107 @@ fn right_pane_copy_text(app: &App<'_>) -> String {
         Executor::format_results(&app.results, app.raw_output)
     }
 }
+
+fn current_query_prefix(app: &App<'_>) -> String {
+    let query = app.query_input.textarea.lines()[0].clone();
+    let cursor_col = app.query_input.textarea.cursor().1;
+    query.chars().take(cursor_col).collect()
+}
+
+fn completion_items_to_suggestions(
+    items: Vec<completions::CompletionItem>,
+) -> Vec<widgets::query_input::Suggestion> {
+    items
+        .into_iter()
+        .map(|i| widgets::query_input::Suggestion {
+            label: i.label,
+            detail: i.detail,
+            insert_text: i.insert_text,
+        })
+        .collect()
+}
+
+fn maybe_activate_structural_hint(app: &mut App<'_>, query_prefix: &str) -> bool {
+    if query_prefix.is_empty() || app.dismissed_hint_query.as_deref() == Some(query_prefix) {
+        return false;
+    }
+
+    let Some(exec) = app.executor.as_ref() else {
+        return false;
+    };
+
+    if let Some(items) =
+        completions::json_context::next_structural_hint(query_prefix, &exec.json_input)
+    {
+        app.query_input.suggestions = completion_items_to_suggestions(items);
+        app.query_input.suggestion_index = 0;
+        app.query_input.suggestion_scroll = 0;
+        app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+        app.structural_hint_active = app.query_input.show_suggestions;
+        return app.structural_hint_active;
+    }
+
+    false
+}
+
+fn dismiss_structural_hint(app: &mut App<'_>, query_prefix: &str) {
+    app.structural_hint_active = false;
+    app.query_input.show_suggestions = false;
+    app.query_input.suggestions.clear();
+    app.dismissed_hint_query = Some(query_prefix.to_string());
+}
+
+fn clear_dismissed_hint_if_query_changed(app: &mut App<'_>, query: &str) {
+    if app
+        .dismissed_hint_query
+        .as_deref()
+        .is_some_and(|q| q != query)
+    {
+        app.dismissed_hint_query = None;
+    }
+}
+
+fn open_suggestions_from_structural_hint(
+    app: &mut App<'_>,
+    query_prefix: &str,
+    lsp_completions: &[completions::CompletionItem],
+    cached_pipe_type: Option<&str>,
+    suggestion_active: &mut bool,
+    select_last: bool,
+) {
+    let Some(hint) = app.query_input.suggestions.first() else {
+        return;
+    };
+
+    let trigger = match hint.label.as_str() {
+        "[]" => "[",
+        "." => ".",
+        _ => "",
+    };
+    if trigger.is_empty() {
+        return;
+    }
+
+    let prefix = format!("{}{}", query_prefix, trigger);
+    app.query_input.suggestions = compute_suggestions(
+        &prefix,
+        app.executor.as_ref().map(|e| &e.json_input),
+        lsp_completions,
+        cached_pipe_type,
+    );
+    app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+    app.structural_hint_active = false;
+    *suggestion_active = true;
+    if app.query_input.show_suggestions {
+        app.query_input.suggestion_index = if select_last {
+            app.query_input.suggestions.len().saturating_sub(1)
+        } else {
+            0
+        };
+        app.query_input.clamp_scroll();
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScrollPane {
     Left,
@@ -1979,5 +2182,59 @@ mod tests {
 
         assert!(!suggestions.iter().any(|s| s.label == "ascii_upcase"));
         assert!(!suggestions.iter().any(|s| s.insert_text == "ascii_upcase"));
+    }
+
+    #[test]
+    fn structural_hint_suppressed_when_dismissed_query_matches() {
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: br#"{"items":[1,2,3]}"#.to_vec(),
+            json_input: serde_json::json!({"items": [1, 2, 3]}),
+            source_label: "test".to_string(),
+        });
+        app.dismissed_hint_query = Some(".items".to_string());
+
+        let activated = maybe_activate_structural_hint(&mut app, ".items");
+
+        assert!(!activated);
+        assert!(!app.structural_hint_active);
+        assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn esc_dismisses_structural_hint_and_sets_dismissed_query() {
+        let mut app = App::new();
+        app.structural_hint_active = true;
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "[]".to_string(),
+            detail: None,
+            insert_text: ".items[]".to_string(),
+        }];
+
+        dismiss_structural_hint(&mut app, ".items");
+
+        assert!(!app.structural_hint_active);
+        assert!(!app.query_input.show_suggestions);
+        assert!(app.query_input.suggestions.is_empty());
+        assert_eq!(app.dismissed_hint_query.as_deref(), Some(".items"));
+    }
+
+    #[test]
+    fn structural_hint_resets_suggestion_index_to_zero() {
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: br#"{"items":[1,2,3]}"#.to_vec(),
+            json_input: serde_json::json!({"items": [1, 2, 3]}),
+            source_label: "test".to_string(),
+        });
+        app.query_input.suggestion_index = 3;
+        app.query_input.suggestion_scroll = 2;
+
+        let activated = maybe_activate_structural_hint(&mut app, ".items");
+
+        assert!(activated);
+        assert_eq!(app.query_input.suggestion_index, 0);
+        assert_eq!(app.query_input.suggestion_scroll, 0);
     }
 }

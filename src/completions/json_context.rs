@@ -9,6 +9,22 @@ pub fn get_completions(query: &str, input: &Value) -> Vec<CompletionItem> {
     completions
 }
 
+pub fn next_structural_hint(query_prefix: &str, input: &Value) -> Option<Vec<CompletionItem>> {
+    if query_prefix.is_empty() || query_prefix.ends_with('[') {
+        return None;
+    }
+
+    if let Some(Value::Array(_)) = find_value_at_path(input, query_prefix) {
+        return Some(vec![CompletionItem {
+            label: "[]".to_string(),
+            detail: None,
+            insert_text: format!("{}[]", query_prefix),
+        }]);
+    }
+
+    None
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Dot-path completions  (.foo.bar, .filesets[].)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -438,5 +454,31 @@ mod tests {
         // [] + indices 0..9 = 11 items max, not 21
         let index_items: Vec<_> = c.iter().filter(|c| c.label != "[]").collect();
         assert_eq!(index_items.len(), 10, "at most 10 numeric indices: {:?}", c);
+    }
+
+    #[test]
+    fn structural_hint_array_path_returns_brackets() {
+        let input = json!({"items": [1, 2, 3]});
+        let hints = next_structural_hint(".items", &input).unwrap();
+        assert_eq!(hints[0].label, "[]");
+        assert_eq!(hints[0].insert_text, ".items[]");
+    }
+
+    #[test]
+    fn structural_hint_array_of_objects_returns_none() {
+        let input = json!({"items": [{"name": "a"}]});
+        assert!(next_structural_hint(".items[]", &input).is_none());
+    }
+
+    #[test]
+    fn structural_hint_scalar_returns_none() {
+        let input = json!({"name": "alice"});
+        assert!(next_structural_hint(".name", &input).is_none());
+    }
+
+    #[test]
+    fn structural_hint_query_ending_bracket_returns_none() {
+        let input = json!({"items": [1, 2, 3]});
+        assert!(next_structural_hint(".items[", &input).is_none());
     }
 }

@@ -140,12 +140,15 @@ impl<'a> QueryInput<'a> {
         if !self.show_suggestions || self.suggestions.is_empty() {
             return None;
         }
+        if query_area.height == 0 {
+            return None;
+        }
         // Cursor column inside the textarea content (0-based).
         let cursor_col = self.textarea.cursor().1 as u16;
         // +1 for the query bar's left border cell.
         let x = query_area.x + 1 + cursor_col;
         // Overlap the query bar's bottom border line by starting one row earlier.
-        let y = query_area.y + query_area.height - 1;
+        let y = query_area.y + query_area.height.saturating_sub(1);
         if y >= screen.height || x >= screen.width {
             return None;
         }
@@ -305,6 +308,19 @@ mod tests {
         }];
         qi.show_suggestions = true;
         assert!(qi.suggestion_rect(narrow, narrow_screen).is_none());
+    }
+
+    #[test]
+    fn dropdown_hidden_when_query_area_height_is_zero() {
+        let mut qi = make_qi_with_suggestions(".", &["foo"]);
+        qi.show_suggestions = true;
+        let zero_height_query = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 0,
+        };
+        assert!(qi.suggestion_rect(zero_height_query, SCREEN).is_none());
     }
 
     // ── rendered output — no "Suggestions" heading ────────────────────────────

@@ -40,6 +40,8 @@ pub struct App<'a> {
     pub lsp_status: Option<String>,
     pub lsp_diagnostic: Option<String>,
     pub lsp_enabled: bool,
+    pub structural_hint_active: bool,
+    pub dismissed_hint_query: Option<String>,
     pub raw_output: bool,
 }
 
@@ -76,6 +78,8 @@ impl<'a> App<'a> {
             lsp_status: None,
             lsp_diagnostic: None,
             lsp_enabled: false,
+            structural_hint_active: false,
+            dismissed_hint_query: None,
             raw_output: false,
         }
     }

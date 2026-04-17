@@ -17,7 +17,7 @@
 
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -96,6 +96,34 @@ fn spawn_with_pty(slave_fd: libc::c_int) -> std::process::Child {
         .unwrap_or_else(|_| panic!("Failed to spawn {BINARY} — run `cargo build` first"))
 }
 
+#[cfg(unix)]
+fn spawn_with_pty_args(slave_fd: libc::c_int, args: &[&str]) -> std::process::Child {
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let slave_in = unsafe { libc::dup(slave_fd) };
+    let slave_out = unsafe { libc::dup(slave_fd) };
+    let slave_err = unsafe { libc::dup(slave_fd) };
+
+    let mut cmd = Command::new(BINARY);
+    cmd.args(args)
+        .env("RUST_BACKTRACE", "1")
+        .stdin(unsafe { Stdio::from_raw_fd(slave_in) })
+        .stdout(unsafe { Stdio::from_raw_fd(slave_out) })
+        .stderr(unsafe { Stdio::from_raw_fd(slave_err) });
+
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setsid();
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0i32);
+            Ok(())
+        });
+    }
+
+    cmd.spawn()
+        .unwrap_or_else(|_| panic!("Failed to spawn {BINARY} — run `cargo build` first"))
+}
+
 /// Drain master in a background thread and signal `ready` when the first
 /// TUI bytes appear (= event loop started + cfmakeraw applied).
 ///
@@ -117,6 +145,29 @@ fn start_drain_thread(master_fd: libc::c_int) -> Arc<AtomicBool> {
         }
     });
     ready
+}
+
+#[cfg(unix)]
+fn start_capture_drain_thread(master_fd: libc::c_int) -> (Arc<AtomicBool>, Arc<Mutex<Vec<u8>>>) {
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = captured.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            let n =
+                unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            ready_clone.store(true, Ordering::Release);
+            if let Ok(mut data) = captured_clone.lock() {
+                data.extend_from_slice(&buf[..n as usize]);
+            }
+        }
+    });
+    (ready, captured)
 }
 
 /// Block until the drain thread signals that the TUI has started rendering,
@@ -458,6 +509,154 @@ fn test_home_in_right_pane() {
         child.try_wait().ok().flatten().is_none(),
         "App crashed after Home in RightPane"
     );
+
+    pty_write(master_fd, b"\x03");
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(3)),
+        "Binary did not exit within 3 s after Ctrl+C"
+    );
+    let _ = child.kill();
+    unsafe { libc::close(master_fd) };
+}
+
+/// Repro guard: selecting a top-level field with Down+Tab must not crash.
+#[test]
+#[cfg(unix)]
+fn test_down_browse_and_tab_does_not_crash() {
+    let (master_fd, slave_fd) = match unsafe { open_pty() } {
+        Some(p) => p,
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
+    };
+
+    let mut child = spawn_with_pty(slave_fd);
+    unsafe { libc::close(slave_fd) };
+
+    let ready = start_drain_thread(master_fd);
+    wait_for_tui(&ready);
+
+    if child.try_wait().ok().flatten().is_some() {
+        unsafe { libc::close(master_fd) };
+        return;
+    }
+
+    pty_write(master_fd, b".");
+    std::thread::sleep(Duration::from_millis(120));
+    pty_write(master_fd, b"\x1b[B"); // Down
+    std::thread::sleep(Duration::from_millis(120));
+    pty_write(master_fd, b"\x1b[B"); // Down
+    std::thread::sleep(Duration::from_millis(120));
+    pty_write(master_fd, b"\t"); // Tab accept
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(
+        child.try_wait().ok().flatten().is_none(),
+        "App crashed after Down/Tab suggestion accept"
+    );
+
+    pty_write(master_fd, b"\x03");
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(3)),
+        "Binary did not exit within 3 s after Ctrl+C"
+    );
+    let _ = child.kill();
+    unsafe { libc::close(master_fd) };
+}
+
+/// Repro guard with real JSON input: selecting an array field and accepting
+/// with Tab must not crash.
+#[test]
+#[cfg(unix)]
+fn test_select_orders_field_with_tab_does_not_crash() {
+    let (master_fd, slave_fd) = match unsafe { open_pty() } {
+        Some(p) => p,
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
+    };
+
+    let mut child = spawn_with_pty_args(slave_fd, &["--debug", "demo/demo.json"]);
+    unsafe { libc::close(slave_fd) };
+
+    let (ready, captured) = start_capture_drain_thread(master_fd);
+    wait_for_tui(&ready);
+
+    if child.try_wait().ok().flatten().is_some() {
+        unsafe { libc::close(master_fd) };
+        return;
+    }
+
+    pty_write(master_fd, b".");
+    std::thread::sleep(Duration::from_millis(120));
+    pty_write(master_fd, b"ord");
+    std::thread::sleep(Duration::from_millis(160));
+    pty_write(master_fd, b"\t"); // accept .orders
+    std::thread::sleep(Duration::from_millis(220));
+
+    if let Some(status) = child.try_wait().ok().flatten() {
+        let log = captured
+            .lock()
+            .ok()
+            .map(|d| String::from_utf8_lossy(&d[..]).to_string())
+            .unwrap_or_else(|| "<capture unavailable>".to_string());
+        panic!(
+            "App crashed after selecting .orders and pressing Tab: status={status:?}\nCaptured output:\n{log}"
+        );
+    }
+
+    pty_write(master_fd, b"\x03");
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(3)),
+        "Binary did not exit within 3 s after Ctrl+C"
+    );
+    let _ = child.kill();
+    unsafe { libc::close(master_fd) };
+}
+
+/// Repro guard: from root suggestions, Down then Tab selecting a complex field
+/// must not crash.
+#[test]
+#[cfg(unix)]
+fn test_down_then_tab_on_root_field_does_not_crash() {
+    let (master_fd, slave_fd) = match unsafe { open_pty() } {
+        Some(p) => p,
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
+    };
+
+    let mut child = spawn_with_pty_args(slave_fd, &["demo/demo.json"]);
+    unsafe { libc::close(slave_fd) };
+
+    let (ready, captured) = start_capture_drain_thread(master_fd);
+    wait_for_tui(&ready);
+
+    if child.try_wait().ok().flatten().is_some() {
+        unsafe { libc::close(master_fd) };
+        return;
+    }
+
+    pty_write(master_fd, b".");
+    std::thread::sleep(Duration::from_millis(150));
+    pty_write(master_fd, b"\x1b[B"); // Down: choose next root field
+    std::thread::sleep(Duration::from_millis(150));
+    pty_write(master_fd, b"\t"); // Tab: accept selection
+    std::thread::sleep(Duration::from_millis(250));
+
+    if let Some(status) = child.try_wait().ok().flatten() {
+        let log = captured
+            .lock()
+            .ok()
+            .map(|d| String::from_utf8_lossy(&d[..]).to_string())
+            .unwrap_or_else(|| "<capture unavailable>".to_string());
+        panic!(
+            "App crashed after Down+Tab root selection: status={status:?}\nCaptured output:\n{log}"
+        );
+    }
 
     pty_write(master_fd, b"\x03");
     assert!(
