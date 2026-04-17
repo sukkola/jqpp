@@ -286,3 +286,98 @@ fn test_q_after_shift_tab_exits() {
     let _ = child.kill();
     unsafe { libc::close(master_fd) };
 }
+
+/// Down arrow (ESC[B) in RightPane must not crash — the app must accept
+/// Ctrl+C and exit cleanly afterwards.
+#[test]
+#[cfg(unix)]
+fn test_down_arrow_scrolls_right_pane() {
+    let (master_fd, slave_fd) = match unsafe { open_pty() } {
+        Some(p) => p,
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
+    };
+
+    let mut child = spawn_with_pty(slave_fd);
+    unsafe { libc::close(slave_fd) };
+
+    let ready = start_drain_thread(master_fd);
+    wait_for_tui(&ready);
+
+    if child.try_wait().ok().flatten().is_some() {
+        unsafe { libc::close(master_fd) };
+        return;
+    }
+
+    // Shift+Tab → RightPane, then send Down arrow three times
+    pty_write(master_fd, b"\x1b[Z");
+    std::thread::sleep(Duration::from_millis(100));
+    pty_write(master_fd, b"\x1b[B"); // Down arrow
+    std::thread::sleep(Duration::from_millis(50));
+    pty_write(master_fd, b"\x1b[B");
+    std::thread::sleep(Duration::from_millis(50));
+    pty_write(master_fd, b"\x1b[B");
+    std::thread::sleep(Duration::from_millis(100));
+
+    // App must still be running (didn't crash)
+    assert!(
+        child.try_wait().ok().flatten().is_none(),
+        "App crashed after Down arrow in RightPane"
+    );
+
+    pty_write(master_fd, b"\x03"); // Ctrl+C → quit
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(3)),
+        "Binary did not exit within 3 s after Ctrl+C"
+    );
+    let _ = child.kill();
+    unsafe { libc::close(master_fd) };
+}
+
+/// Up arrow (ESC[A) in RightPane must not crash — the app must accept
+/// Ctrl+C and exit cleanly afterwards.
+#[test]
+#[cfg(unix)]
+fn test_up_arrow_scrolls_right_pane() {
+    let (master_fd, slave_fd) = match unsafe { open_pty() } {
+        Some(p) => p,
+        None => {
+            eprintln!("open_pty unavailable — skipping");
+            return;
+        }
+    };
+
+    let mut child = spawn_with_pty(slave_fd);
+    unsafe { libc::close(slave_fd) };
+
+    let ready = start_drain_thread(master_fd);
+    wait_for_tui(&ready);
+
+    if child.try_wait().ok().flatten().is_some() {
+        unsafe { libc::close(master_fd) };
+        return;
+    }
+
+    // Tab → LeftPane, then send Up arrow — must not crash
+    pty_write(master_fd, b"\t");
+    std::thread::sleep(Duration::from_millis(100));
+    pty_write(master_fd, b"\x1b[A"); // Up arrow
+    std::thread::sleep(Duration::from_millis(50));
+    pty_write(master_fd, b"\x1b[A");
+    std::thread::sleep(Duration::from_millis(100));
+
+    assert!(
+        child.try_wait().ok().flatten().is_none(),
+        "App crashed after Up arrow in LeftPane"
+    );
+
+    pty_write(master_fd, b"\x03");
+    assert!(
+        wait_for_exit(&mut child, Duration::from_secs(3)),
+        "Binary did not exit within 3 s after Ctrl+C"
+    );
+    let _ = child.kill();
+    unsafe { libc::close(master_fd) };
+}

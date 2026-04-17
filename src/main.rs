@@ -467,6 +467,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                 match compute_handle.take().unwrap().await {
                     Ok((Ok((results, raw)), pipe_type)) => {
                         app.results = results;
+                        app.right_scroll = 0;
                         app.error = None;
                         app.raw_output = raw;
                         cached_pipe_type = pipe_type;
@@ -855,13 +856,17 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                 app.next_pane();
                             } else if is_action(keymap::Action::PrevPane) {
                                 app.prev_pane();
-                            } else if is_action(keymap::Action::ScrollDown) {
+                            } else if is_action(keymap::Action::ScrollDown)
+                                || matches!(key.code, KeyCode::Down)
+                            {
                                 if matches!(app.state, AppState::LeftPane) {
                                     app.left_scroll += 1;
                                 } else {
                                     app.right_scroll += 1;
                                 }
-                            } else if is_action(keymap::Action::ScrollUp) {
+                            } else if is_action(keymap::Action::ScrollUp)
+                                || matches!(key.code, KeyCode::Up)
+                            {
                                 if matches!(app.state, AppState::LeftPane) {
                                     app.left_scroll = app.left_scroll.saturating_sub(1);
                                 } else {

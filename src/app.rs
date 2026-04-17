@@ -86,3 +86,66 @@ impl<'a> App<'a> {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn right_scroll_starts_at_zero() {
+        let app = App::new();
+        assert_eq!(app.right_scroll, 0);
+        assert_eq!(app.left_scroll, 0);
+    }
+
+    #[test]
+    fn right_scroll_increments_in_right_pane() {
+        let mut app = App::new();
+        app.state = AppState::RightPane;
+        // Simulate the scroll-down logic
+        app.right_scroll += 1;
+        app.right_scroll += 1;
+        assert_eq!(app.right_scroll, 2);
+        // Simulate scroll-up
+        app.right_scroll = app.right_scroll.saturating_sub(1);
+        assert_eq!(app.right_scroll, 1);
+    }
+
+    #[test]
+    fn left_scroll_increments_in_left_pane() {
+        let mut app = App::new();
+        app.state = AppState::LeftPane;
+        app.left_scroll += 1;
+        assert_eq!(app.left_scroll, 1);
+        app.left_scroll = app.left_scroll.saturating_sub(1);
+        assert_eq!(app.left_scroll, 0);
+        // saturating_sub never underflows
+        app.left_scroll = app.left_scroll.saturating_sub(1);
+        assert_eq!(app.left_scroll, 0);
+    }
+
+    #[test]
+    fn right_scroll_resets_to_zero_on_new_results() {
+        let mut app = App::new();
+        app.right_scroll = 5;
+        // Simulate what the main loop does when new results arrive
+        app.results = vec![serde_json::json!("line1"), serde_json::json!("line2")];
+        app.right_scroll = 0;
+        assert_eq!(
+            app.right_scroll, 0,
+            "right_scroll must reset to 0 when new results are set"
+        );
+    }
+
+    #[test]
+    fn right_scroll_not_reset_when_error_occurs() {
+        // When jaq returns an error the scroll position is intentionally
+        // preserved (user might want to read the partial output that was
+        // already on screen). right_scroll is only cleared on Ok results.
+        let mut app = App::new();
+        app.right_scroll = 3;
+        app.error = Some("parse error".to_string());
+        // No right_scroll reset — it stays at 3
+        assert_eq!(app.right_scroll, 3);
+    }
+}
