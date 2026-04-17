@@ -1288,43 +1288,51 @@ async fn main_loop<B: ratatui::backend::Backend>(
             let query = app.query_input.textarea.lines()[0].clone();
             let cursor_col = app.query_input.textarea.cursor().1;
             let query_prefix: String = query.chars().take(cursor_col).collect();
+            let hold_output_during_suggestions =
+                should_hold_output_during_suggestions(&query_prefix, suggestion_active);
             let effective_query = if query.trim().is_empty() {
                 ".".to_string()
             } else {
                 query.clone()
             };
 
+            if hold_output_during_suggestions {
+                compute_handle = None;
+            }
+
             if let Some(ref exec) = app.executor {
                 if query_prefix.rfind('|').is_none() {
                     cached_pipe_type = None;
                 }
-                let eq = effective_query.clone();
-                let q = query_prefix.clone();
-                let input = exec.json_input.clone();
-                compute_handle = Some(tokio::task::spawn_blocking(move || {
-                    let main_result = Executor::execute_query(&eq, &input);
-                    let type_query = Executor::strip_format_op(&q)
-                        .map(|(base, _)| base)
-                        .unwrap_or_else(|| q.clone());
-                    let pipe_type = type_query.rfind('|').and_then(|p| {
-                        let prefix = type_query[..p].trim();
-                        if prefix.is_empty() {
-                            return None;
-                        }
-                        Executor::execute(prefix, &input)
-                            .ok()
-                            .and_then(|mut r| {
-                                if r.is_empty() {
-                                    None
-                                } else {
-                                    Some(r.swap_remove(0))
-                                }
-                            })
-                            .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
-                    });
-                    (main_result, pipe_type)
-                }));
-                pending_qp = query_prefix.clone();
+                if !hold_output_during_suggestions {
+                    let eq = effective_query.clone();
+                    let q = query_prefix.clone();
+                    let input = exec.json_input.clone();
+                    compute_handle = Some(tokio::task::spawn_blocking(move || {
+                        let main_result = Executor::execute_query(&eq, &input);
+                        let type_query = Executor::strip_format_op(&q)
+                            .map(|(base, _)| base)
+                            .unwrap_or_else(|| q.clone());
+                        let pipe_type = type_query.rfind('|').and_then(|p| {
+                            let prefix = type_query[..p].trim();
+                            if prefix.is_empty() {
+                                return None;
+                            }
+                            Executor::execute(prefix, &input)
+                                .ok()
+                                .and_then(|mut r| {
+                                    if r.is_empty() {
+                                        None
+                                    } else {
+                                        Some(r.swap_remove(0))
+                                    }
+                                })
+                                .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
+                        });
+                        (main_result, pipe_type)
+                    }));
+                    pending_qp = query_prefix.clone();
+                }
 
                 if suggestion_active {
                     app.query_input.suggestions = compute_suggestions(
@@ -1446,6 +1454,21 @@ fn should_ignore_query_input_key(key: &ratatui::crossterm::event::KeyEvent) -> b
             && key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER))
+}
+
+fn should_hold_output_during_suggestions(query_prefix: &str, suggestion_active: bool) -> bool {
+    if !suggestion_active {
+        return false;
+    }
+
+    let trimmed = query_prefix.trim_end();
+    let Some(last) = trimmed.chars().last() else {
+        return false;
+    };
+
+    matches!(last, '.' | '|' | '[' | '{' | '(' | ',' | ':')
+        || last.is_ascii_alphanumeric()
+        || matches!(last, '_' | '-' | '@' | '"' | '\'')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1744,5 +1767,20 @@ mod tests {
         });
 
         assert!(should_drop_boundary_scroll_event(&app, &evt));
+    }
+
+    #[test]
+    fn holds_output_for_partial_suggestion_token() {
+        assert!(should_hold_output_during_suggestions(".items[].na", true));
+        assert!(should_hold_output_during_suggestions(".items.", true));
+    }
+
+    #[test]
+    fn releases_output_for_committed_parent_segment() {
+        assert!(!should_hold_output_during_suggestions(".items[]", true));
+        assert!(!should_hold_output_during_suggestions(
+            ".items[] | .",
+            false
+        ));
     }
 }
