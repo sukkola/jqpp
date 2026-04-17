@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
     not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
 ))]
 use arboard::SetExtLinux;
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
@@ -27,8 +27,20 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Result,
+    Query,
+    Input,
+}
+
 #[derive(Parser, Debug)]
 #[command(version)]
+#[command(group(
+    ArgGroup::new("output")
+        .args(["print_output", "print_query", "print_input"])
+        .multiple(false)
+))]
 struct Args {
     /// Positional [file]
     file: Option<PathBuf>,
@@ -48,6 +60,18 @@ struct Args {
     /// Print effective config and exit
     #[arg(long)]
     print_config: bool,
+
+    /// Print current output to stdout on exit
+    #[arg(long, group = "output")]
+    print_output: bool,
+
+    /// Print current query to stdout on exit
+    #[arg(long, group = "output")]
+    print_query: bool,
+
+    /// Print raw input JSON to stdout on exit
+    #[arg(long, group = "output")]
+    print_input: bool,
 }
 
 struct TtyWriter(std::fs::File);
@@ -281,8 +305,47 @@ fn copy_text_to_clipboard(text: String) {
     });
 }
 
+fn output_mode_from_args(args: &Args) -> Option<OutputMode> {
+    if args.print_output {
+        Some(OutputMode::Result)
+    } else if args.print_query {
+        Some(OutputMode::Query)
+    } else if args.print_input {
+        Some(OutputMode::Input)
+    } else {
+        None
+    }
+}
+
+fn selected_output(app: &App<'_>, mode: OutputMode) -> Option<String> {
+    match mode {
+        OutputMode::Result => {
+            if app.results.is_empty() {
+                None
+            } else {
+                Some(Executor::format_results(&app.results, app.raw_output))
+            }
+        }
+        OutputMode::Query => Some(
+            app.query_input
+                .textarea
+                .lines()
+                .first()
+                .cloned()
+                .unwrap_or_default(),
+        ),
+        OutputMode::Input => Some(
+            app.executor
+                .as_ref()
+                .map(|e| String::from_utf8_lossy(&e.raw_input).into_owned())
+                .unwrap_or_default(),
+        ),
+    }
+}
+
 fn actual_main(args: Args) -> Result<()> {
     setup_panic_hook(args.debug);
+    let output_mode = output_mode_from_args(&args);
 
     let mut input_data = Vec::new();
     let stdin_is_terminal = io::stdin().is_terminal();
@@ -346,7 +409,22 @@ fn actual_main(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    rt.block_on(run(executor, args, tty_handle, keymap, config_error))
+    let app = rt.block_on(run(
+        executor,
+        args,
+        tty_handle,
+        keymap,
+        config_error,
+        output_mode,
+    ))?;
+
+    if let Some(mode) = output_mode
+        && let Some(text) = selected_output(&app, mode)
+    {
+        println!("{}", text);
+    }
+
+    Ok(())
 }
 
 async fn run(
@@ -355,26 +433,34 @@ async fn run(
     tty_handle: Option<std::fs::File>,
     keymap: keymap::Keymap,
     config_error: Option<String>,
-) -> Result<()> {
+    output_mode: Option<OutputMode>,
+) -> Result<App<'static>> {
     // Headless mode: used by integration tests. Start LSP if requested but
     // never touch the terminal — no raw mode, no alternate screen.
     let use_lsp = !args.no_lsp && lsp_on_path();
 
-    if std::env::var("JQPP_SKIP_TTY_CHECK").is_ok() {
-        if use_lsp {
-            let (lsp_tx, _lsp_rx) = mpsc::channel::<LspMessage>(100);
-            let mut provider = LspProvider::new();
-            let _ = provider.start(lsp_tx).await;
-            // Park until the test kills us.
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            let _ = provider.shutdown().await;
-        }
-        return Ok(());
-    }
-
     let mut app = App::new();
     app.lsp_enabled = use_lsp;
     app.executor = executor;
+
+    if std::env::var("JQPP_SKIP_TTY_CHECK").is_ok() {
+        if output_mode.is_some() {
+            if let Some(ref exec) = app.executor
+                && let Ok(results) = Executor::execute(".", &exec.json_input)
+            {
+                app.results = results;
+                app.error = None;
+                app.raw_output = false;
+            }
+        } else if use_lsp {
+            let (lsp_tx, _lsp_rx) = mpsc::channel::<LspMessage>(100);
+            let mut provider = LspProvider::new();
+            let _ = provider.start(lsp_tx).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let _ = provider.shutdown().await;
+        }
+        return Ok(app);
+    }
 
     if let Some(err) = config_error {
         app.footer_message = Some(err);
@@ -405,12 +491,14 @@ async fn run(
         Some(tty) => {
             let backend = CrosstermBackend::new(TtyWriter(tty));
             let mut terminal = Terminal::new(backend)?;
-            main_loop(&mut terminal, &mut app, lsp_provider, &mut lsp_rx, &keymap).await
+            main_loop(&mut terminal, &mut app, lsp_provider, &mut lsp_rx, &keymap).await?;
+            Ok(app)
         }
         None => {
             let backend = CrosstermBackend::new(io::stdout());
             let mut terminal = Terminal::new(backend)?;
-            main_loop(&mut terminal, &mut app, lsp_provider, &mut lsp_rx, &keymap).await
+            main_loop(&mut terminal, &mut app, lsp_provider, &mut lsp_rx, &keymap).await?;
+            Ok(app)
         }
     }
 }

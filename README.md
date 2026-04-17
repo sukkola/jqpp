@@ -47,6 +47,24 @@ cat data.json | jqpp
 
 # Disable LSP even if jq-lsp is on PATH
 jqpp data.json --no-lsp
+
+# Print selected content to stdout on exit
+jqpp data.json --print-output
+jqpp data.json --print-query
+jqpp data.json --print-input
+```
+
+### Pipeline usage
+
+```bash
+# Explore interactively, then pipe final result
+jqpp data.json --print-output | jq -r '.[0].name'
+
+# Reuse the final query in another command
+jqpp data.json --print-query | xargs -I{} jq '{}' data.json
+
+# Pass the original input through another tool after interactive editing
+jqpp data.json --print-input | jq 'keys'
 ```
 
 ### Keybindings
