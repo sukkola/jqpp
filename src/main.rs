@@ -28,9 +28,9 @@ struct Args {
     /// Positional [file]
     file: Option<PathBuf>,
 
-    /// Enable LSP
+    /// Disable LSP even if jq-lsp is found on PATH
     #[arg(long)]
-    lsp: bool,
+    no_lsp: bool,
 
     /// Enable debug mode (shows stack traces)
     #[arg(long)]
@@ -208,6 +208,17 @@ fn main() {
     }
 }
 
+fn lsp_on_path() -> bool {
+    let bin = std::env::var("JQPP_LSP_BIN").unwrap_or_else(|_| "jq-lsp".to_string());
+    let path = std::path::Path::new(&bin);
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    std::env::var("PATH")
+        .map(|p| std::env::split_paths(&p).any(|dir| dir.join(&bin).is_file()))
+        .unwrap_or(false)
+}
+
 fn get_tty_handle() -> Option<std::fs::File> {
     #[cfg(unix)]
     {
@@ -317,8 +328,10 @@ async fn run(
 ) -> Result<()> {
     // Headless mode: used by integration tests. Start LSP if requested but
     // never touch the terminal — no raw mode, no alternate screen.
+    let use_lsp = !args.no_lsp && lsp_on_path();
+
     if std::env::var("JQPP_SKIP_TTY_CHECK").is_ok() {
-        if args.lsp {
+        if use_lsp {
             let (lsp_tx, _lsp_rx) = mpsc::channel::<LspMessage>(100);
             let mut provider = LspProvider::new();
             let _ = provider.start(lsp_tx).await;
@@ -330,7 +343,7 @@ async fn run(
     }
 
     let mut app = App::new();
-    app.lsp_enabled = args.lsp;
+    app.lsp_enabled = use_lsp;
     app.executor = executor;
 
     if let Some(err) = config_error {
@@ -339,7 +352,7 @@ async fn run(
     }
 
     let (lsp_tx, mut lsp_rx) = mpsc::channel::<LspMessage>(100);
-    let lsp_provider = if args.lsp {
+    let lsp_provider = if use_lsp {
         let mut provider = LspProvider::new();
         if provider.start(lsp_tx).await.is_ok() {
             Some(provider)

@@ -10,7 +10,7 @@ While tools like [`jqp`](https://github.com/noahgorstein/jqp) provide a great in
 
 - **JSON-context field completions**: jq++ walks your live JSON input (up to 4 levels deep) to suggest actual field names and array indices at your current cursor position.
 - **Type-aware builtin catalog**: Suggestions for jq's ~90 built-in functions are filtered by the runtime type flowing into the pipe. For example, `ascii_upcase` is only suggested after a string-producing expression.
-- **LSP Integration**: Optional integration with [`jq-lsp`](https://github.com/wader/jq-lsp) provides real-time diagnostics and function signatures directly in the TUI footer.
+- **LSP Integration**: Automatic integration with [`jq-lsp`](https://github.com/wader/jq-lsp) if it is found on your PATH — provides real-time diagnostics and function signatures directly in the TUI footer.
 
 ## Features
 
@@ -45,8 +45,8 @@ jqpp data.json
 # Read from stdin
 cat data.json | jqpp
 
-# Enable jq-lsp integration
-jqpp data.json --lsp
+# Disable LSP even if jq-lsp is on PATH
+jqpp data.json --no-lsp
 ```
 
 ### Keybindings
@@ -84,13 +84,19 @@ Use `jqpp --print-config` to see the full list of remappable actions and their c
 
 ## jq-lsp Setup
 
-For diagnostics and additional function signatures, install `jq-lsp`:
+jq++ automatically detects and uses [`jq-lsp`](https://github.com/wader/jq-lsp) if it is present on your PATH. Install it with:
 
 ```bash
 go install github.com/wader/jq-lsp@latest
 ```
 
-Enable it in jq++ with the `--lsp` flag. You can override the binary path using the `JQPP_LSP_BIN` environment variable.
+Once installed, jq-lsp starts automatically when you launch jqpp — no flags needed. It adds real-time parse diagnostics shown in the footer.
+
+To disable LSP for a session, pass `--no-lsp`. To use a binary at a custom path, set `JQPP_LSP_BIN`:
+
+```bash
+JQPP_LSP_BIN=/usr/local/bin/jq-lsp jqpp data.json
+```
 
 ## Related Projects
 
