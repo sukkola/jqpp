@@ -195,22 +195,17 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     // ── arrays ────────────────────────────────────────────────────────────────
     ("sort", "sort", "sort elements", InputType::Array),
-    (
-        "sort_by",
-        "sort_by(.key)",
-        "sort by key expr",
-        InputType::Array,
-    ),
+    ("sort_by", "sort_by()", "sort by key expr", InputType::Array),
     (
         "group_by",
-        "group_by(.key)",
+        "group_by()",
         "group into sub-arrays",
         InputType::Array,
     ),
     ("unique", "unique", "deduplicate", InputType::Array),
     (
         "unique_by",
-        "unique_by(.key)",
+        "unique_by()",
         "deduplicate by key",
         InputType::Array,
     ),
@@ -224,18 +219,8 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ("add", "add", "sum / concatenate", InputType::Array),
     ("min", "min", "minimum element", InputType::Array),
     ("max", "max", "maximum element", InputType::Array),
-    (
-        "min_by",
-        "min_by(.key)",
-        "min by key expr",
-        InputType::Array,
-    ),
-    (
-        "max_by",
-        "max_by(.key)",
-        "max by key expr",
-        InputType::Array,
-    ),
+    ("min_by", "min_by()", "min by key expr", InputType::Array),
+    ("max_by", "max_by()", "max by key expr", InputType::Array),
     ("map", "map(.)", "transform each element", InputType::Array),
     (
         "any",
@@ -301,7 +286,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "keys without sort",
         InputType::Object,
     ),
-    ("del", "del(.field)", "delete key/path", InputType::Object),
+    ("del", "del()", "delete key/path", InputType::Object),
     // ── arrays or objects ─────────────────────────────────────────────────────
     (
         "keys",
@@ -372,7 +357,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ("tojson", "tojson", "encode to JSON string", InputType::Any),
     ("tostring", "tostring", "convert to string", InputType::Any),
     ("tonumber", "tonumber", "convert to number", InputType::Any),
-    ("path", "path(..)", "path to value", InputType::Any),
+    ("path", "path()", "path to value", InputType::Any),
     ("paths", "paths", "all paths in value", InputType::Any),
     (
         "leaf_paths",
@@ -703,6 +688,30 @@ mod tests {
             "split insert_text must include parens: {}",
             item.insert_text
         );
+    }
+
+    #[test]
+    fn field_path_functions_insert_text_starts_param_context() {
+        let c = get_completions("", Some("array"));
+        let sort_by = c.iter().find(|i| i.label == "sort_by").unwrap();
+        assert_eq!(sort_by.insert_text, "sort_by()");
+
+        let group_by = c.iter().find(|i| i.label == "group_by").unwrap();
+        assert_eq!(group_by.insert_text, "group_by()");
+
+        let unique_by = c.iter().find(|i| i.label == "unique_by").unwrap();
+        assert_eq!(unique_by.insert_text, "unique_by()");
+    }
+
+    #[test]
+    fn del_and_path_insert_text_starts_param_context() {
+        let obj = get_completions("", Some("object"));
+        let del = obj.iter().find(|i| i.label == "del").unwrap();
+        assert_eq!(del.insert_text, "del()");
+
+        let any = get_completions("", None);
+        let path = any.iter().find(|i| i.label == "path").unwrap();
+        assert_eq!(path.insert_text, "path()");
     }
 
     // ── Boolean type exclusions ───────────────────────────────────────────────

@@ -1,11 +1,22 @@
 use crate::completions::CompletionItem;
 use serde_json::Value;
 
+const FIELD_PATH_ARRAY_FNS: &[&str] = &["sort_by", "group_by", "unique_by", "min_by", "max_by"];
+const FIELD_PATH_INPUT_FNS: &[&str] = &["del", "path"];
+
+pub struct ParamFieldCtx<'a> {
+    pub fn_name: &'a str,
+    pub context_path: &'a str,
+    pub inner_prefix: &'a str,
+    inner_start: usize,
+}
+
 pub fn get_completions(query: &str, input: &Value) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
     dot_path_completions(query, input, &mut completions);
     obj_constructor_completions(query, input, &mut completions);
     array_index_completions(query, input, &mut completions);
+    param_field_completions(query, input, &mut completions);
     completions
 }
 
@@ -23,6 +34,124 @@ pub fn next_structural_hint(query_prefix: &str, input: &Value) -> Option<Vec<Com
     }
 
     None
+}
+
+pub fn param_field_context(query: &str) -> Option<ParamFieldCtx<'_>> {
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut depth: i32 = 0;
+    let mut open_paren: Option<usize> = None;
+    for (idx, ch) in query.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 {
+                    open_paren = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open_paren?;
+
+    let before_open = query[..open].trim_end();
+    if before_open.is_empty() {
+        return None;
+    }
+
+    let fn_end = before_open.len();
+    let mut fn_start = fn_end;
+    for (idx, ch) in before_open.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            fn_start = idx;
+        } else {
+            break;
+        }
+    }
+    if fn_start == fn_end {
+        return None;
+    }
+
+    let fn_name = &before_open[fn_start..fn_end];
+    if !FIELD_PATH_ARRAY_FNS.contains(&fn_name) && !FIELD_PATH_INPUT_FNS.contains(&fn_name) {
+        return None;
+    }
+
+    let context_path = pipe_context_before(before_open[..fn_start].trim_end());
+
+    let inner_full = &query[open + 1..];
+    let list_rel = if inner_full.trim_start().starts_with('[') {
+        let ws = inner_full.len() - inner_full.trim_start().len();
+        Some(ws + 1)
+    } else {
+        None
+    };
+    let comma_rel = inner_full.rfind(',').map(|i| i + 1);
+    let arg_rel = comma_rel.or(list_rel).unwrap_or(0);
+    let after_comma = &inner_full[arg_rel..];
+    let leading_ws = after_comma.len() - after_comma.trim_start().len();
+    let inner_prefix = after_comma.trim_start();
+    let inner_start = open + 1 + arg_rel + leading_ws;
+
+    Some(ParamFieldCtx {
+        fn_name,
+        context_path,
+        inner_prefix,
+        inner_start,
+    })
+}
+
+fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
+    let Some(ctx) = param_field_context(query) else {
+        return;
+    };
+
+    let context_value = find_value_at_path(input, ctx.context_path).or_else(|| {
+        if ctx
+            .context_path
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '[' | ']'))
+        {
+            None
+        } else {
+            Some(input)
+        }
+    });
+
+    let source_obj = if FIELD_PATH_ARRAY_FNS.contains(&ctx.fn_name) {
+        match context_value {
+            Some(Value::Array(arr)) => match arr.first() {
+                Some(Value::Object(_)) => arr.first(),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        match context_value {
+            Some(Value::Object(_)) => context_value,
+            _ => None,
+        }
+    };
+
+    let Some(source) = source_obj else {
+        return;
+    };
+
+    let mut param_items = Vec::new();
+    dot_path_completions(ctx.inner_prefix, source, &mut param_items);
+    for mut item in param_items {
+        item.insert_text = format!("{}{}", &query[..ctx.inner_start], item.insert_text);
+        if !out
+            .iter()
+            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+        {
+            out.push(item);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -480,5 +609,238 @@ mod tests {
     fn structural_hint_query_ending_bracket_returns_none() {
         let input = json!({"items": [1, 2, 3]});
         assert!(next_structural_hint(".items[", &input).is_none());
+    }
+
+    fn labels(v: &[CompletionItem]) -> Vec<String> {
+        v.iter().map(|c| c.label.clone()).collect()
+    }
+
+    fn has_insert(v: &[CompletionItem], insert: &str) -> bool {
+        v.iter().any(|c| c.insert_text == insert)
+    }
+
+    #[test]
+    fn param_ctx_none_after_closing_paren() {
+        assert!(param_field_context("sort_by(.name)").is_none());
+        assert!(param_field_context("sort_by(.name) | .").is_none());
+        assert!(param_field_context("sort_by(.name).foo").is_none());
+    }
+
+    #[test]
+    fn param_ctx_inside_parens_variants() {
+        let c = param_field_context("sort_by(").unwrap();
+        assert_eq!(c.fn_name, "sort_by");
+        assert_eq!(c.inner_prefix, "");
+
+        assert_eq!(param_field_context("sort_by(.").unwrap().inner_prefix, ".");
+        assert_eq!(
+            param_field_context("sort_by(.na").unwrap().inner_prefix,
+            ".na"
+        );
+        assert_eq!(
+            param_field_context("sort_by(.customer.na")
+                .unwrap()
+                .inner_prefix,
+            ".customer.na"
+        );
+    }
+
+    #[test]
+    fn param_ctx_pipe_and_function_filtering() {
+        let c = param_field_context(".orders[] | sort_by(.na").unwrap();
+        assert_eq!(c.context_path, ".orders[]");
+        assert_eq!(c.inner_prefix, ".na");
+
+        assert!(param_field_context("map(.").is_none());
+        assert!(param_field_context("select(.").is_none());
+        assert!(param_field_context("with_entries(.").is_none());
+        assert!(param_field_context("").is_none());
+        assert!(param_field_context(".").is_none());
+        assert_eq!(param_field_context("del(.").unwrap().fn_name, "del");
+        assert_eq!(param_field_context("path(.").unwrap().fn_name, "path");
+        assert_eq!(
+            param_field_context("sort_by(.a) | group_by(.")
+                .unwrap()
+                .fn_name,
+            "group_by"
+        );
+        assert_eq!(
+            param_field_context("sort_by(.name, .")
+                .unwrap()
+                .inner_prefix,
+            "."
+        );
+    }
+
+    #[test]
+    fn param_sort_by_basic_and_prefix() {
+        let c = get_completions("sort_by(.", &json!([{"name":"a","age":1}]));
+        assert!(labels(&c).contains(&"name".to_string()));
+        assert!(labels(&c).contains(&"age".to_string()));
+        assert!(has_insert(&c, "sort_by(.name"));
+        assert!(has_insert(&c, "sort_by(.age"));
+
+        let c = get_completions(
+            "sort_by(.na",
+            &json!([{"name":"a","namespace":"b","age":1}]),
+        );
+        let ls = labels(&c);
+        assert!(ls.contains(&"name".to_string()));
+        assert!(ls.contains(&"namespace".to_string()));
+        assert!(!ls.contains(&"age".to_string()));
+    }
+
+    #[test]
+    fn param_group_unique_min_max_and_pipe_context() {
+        let c = get_completions("group_by(.", &json!([{"status":"x"}]));
+        assert!(has_insert(&c, "group_by(.status"));
+
+        let c = get_completions("unique_by(.", &json!([{"id":1}]));
+        assert!(has_insert(&c, "unique_by(.id"));
+
+        let c = get_completions("min_by(.", &json!([{"price":1.0,"qty":5}]));
+        assert!(labels(&c).contains(&"price".to_string()));
+        assert!(labels(&c).contains(&"qty".to_string()));
+
+        let c = get_completions("max_by(.", &json!([{"score":99}]));
+        assert!(labels(&c).contains(&"score".to_string()));
+
+        let c = get_completions(
+            ".orders[] | sort_by(.",
+            &json!({"orders":[{"id":1,"total":9.9}]}),
+        );
+        assert!(has_insert(&c, ".orders[] | sort_by(.id"));
+        assert!(has_insert(&c, ".orders[] | sort_by(.total"));
+    }
+
+    #[test]
+    fn param_del_and_path_completions() {
+        let c = get_completions("del(.", &json!({"name":"alice","age":30}));
+        assert!(has_insert(&c, "del(.name"));
+        assert!(has_insert(&c, "del(.age"));
+
+        let c = get_completions("del(.ag", &json!({"name":"alice","age":30}));
+        let ls = labels(&c);
+        assert_eq!(ls, vec!["age".to_string()]);
+
+        let c = get_completions("path(.", &json!({"a":1,"b":2}));
+        assert!(has_insert(&c, "path(.a"));
+        assert!(has_insert(&c, "path(.b"));
+
+        let c = get_completions(".user | del(.", &json!({"user":{"id":1,"token":"x"}}));
+        assert!(has_insert(&c, ".user | del(.id"));
+        assert!(has_insert(&c, ".user | del(.token"));
+    }
+
+    #[test]
+    fn param_nested_field_paths() {
+        let c = get_completions(
+            "sort_by(.customer.",
+            &json!([{"customer":{"name":"a","id":1}}]),
+        );
+        assert!(has_insert(&c, "sort_by(.customer.name"));
+        assert!(has_insert(&c, "sort_by(.customer.id"));
+    }
+
+    #[test]
+    fn param_list_syntax_completions_supported() {
+        let c = get_completions("sort_by([.", &json!([{"name":"Alice","age":30}]));
+        assert!(has_insert(&c, "sort_by([.name"));
+        assert!(has_insert(&c, "sort_by([.age"));
+
+        let c = get_completions(
+            "sort_by([.name, .",
+            &json!([{"name":"Alice","age":30,"order_date":"2024-01-01"}]),
+        );
+        assert!(has_insert(&c, "sort_by([.name, .age"));
+        assert!(has_insert(&c, "sort_by([.name, .order_date"));
+    }
+
+    #[test]
+    fn param_list_syntax_exit_context_after_closing_paren() {
+        let input = json!([{"name":"Alice","age":30}]);
+        assert!(
+            get_completions("sort_by([.name, .age])", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("sort_by(["))
+        );
+        assert!(
+            get_completions("sort_by([.name, .age]) | .", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("sort_by(["))
+        );
+    }
+
+    #[test]
+    fn param_exit_and_excluded_functions() {
+        let input = json!([{"x":1,"name":"a"}]);
+        assert!(
+            get_completions("sort_by(.name)", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("sort_by("))
+        );
+        assert!(
+            get_completions("sort_by(.name) | .", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("sort_by("))
+        );
+        assert!(
+            get_completions("sort_by(.name).f", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("sort_by("))
+        );
+        assert!(
+            get_completions("map(.", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("map("))
+        );
+        assert!(
+            get_completions("select(.", &json!({"a":1}))
+                .iter()
+                .all(|c| !c.insert_text.starts_with("select("))
+        );
+        assert!(
+            get_completions("with_entries(.", &json!({"a":1}))
+                .iter()
+                .all(|c| !c.insert_text.starts_with("with_entries("))
+        );
+        assert!(
+            get_completions("any(.", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("any("))
+        );
+        assert!(
+            get_completions("all(.", &input)
+                .iter()
+                .all(|c| !c.insert_text.starts_with("all("))
+        );
+    }
+
+    #[test]
+    fn param_edge_cases_and_guard_conditions() {
+        assert!(get_completions("sort_by(.", &json!([])).is_empty());
+        assert!(get_completions("sort_by(.", &json!([1, 2, 3])).is_empty());
+        assert!(get_completions("sort_by(.", &json!("hello")).is_empty());
+        assert!(get_completions("sort_by(.", &json!(null)).is_empty());
+        assert!(get_completions(".missing | sort_by(.", &json!({"other":[]})).is_empty());
+        assert!(get_completions("del(.", &json!([1, 2])).is_empty());
+        assert!(get_completions("del(.", &json!("hello")).is_empty());
+
+        let c = get_completions("sort_by(.na", &json!([{"name":"a"}]));
+        assert!(
+            c.iter()
+                .filter(|i| i.insert_text.starts_with("sort_by("))
+                .all(|i| !i.insert_text.ends_with(')'))
+        );
+
+        let c = get_completions("sort_by(.a) | group_by(.", &json!([{"x":1}]));
+        assert!(has_insert(&c, "sort_by(.a) | group_by(.x"));
+
+        let c = get_completions(".a | del(.", &json!({"a":{"x":1}}));
+        let cnt = c
+            .iter()
+            .filter(|i| i.label == "x" && i.insert_text == ".a | del(.x")
+            .count();
+        assert_eq!(cnt, 1);
     }
 }

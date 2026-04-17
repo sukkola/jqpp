@@ -852,6 +852,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             [app.query_input.suggestion_index]
                                             .insert_text
                                             .clone();
+                                        let starts_param_field_context =
+                                            is_field_path_function_call_start(&suggestion);
                                         let cur = app.query_input.textarea.cursor().1;
                                         let full = app.query_input.textarea.lines()[0].clone();
                                         let suffix: String = full.chars().skip(cur).collect();
@@ -871,7 +873,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             .textarea
                                             .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                         app.query_input.show_suggestions = false;
-                                        suggestion_active = false;
+                                        suggestion_active = starts_param_field_context;
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_edit_at = Instant::now() - debounce_duration;
@@ -964,6 +966,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             [app.query_input.suggestion_index]
                                             .insert_text
                                             .clone();
+                                        let starts_param_field_context =
+                                            is_field_path_function_call_start(&suggestion);
                                         let cur = app.query_input.textarea.cursor().1;
                                         let full = app.query_input.textarea.lines()[0].clone();
                                         let suffix: String = full.chars().skip(cur).collect();
@@ -983,7 +987,7 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             .textarea
                                             .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                         app.query_input.show_suggestions = false;
-                                        suggestion_active = false;
+                                        suggestion_active = starts_param_field_context;
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_edit_at = Instant::now() - debounce_duration;
@@ -1124,35 +1128,45 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                     } else if matches!(app.state, AppState::SideMenu) {
                                         app.state = AppState::QueryInput;
                                     }
+                                } else if matches!(
+                                    key.code,
+                                    KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+                                ) {
+                                    // Cursor movement doesn't change text so textarea.input()
+                                    // returns false — the hint-clearing block below is never
+                                    // reached.  Dismiss the structural hint explicitly here
+                                    // before forwarding the key to the textarea.
+                                    // Clear any active hint without setting
+                                    // dismissed_hint_query so it can reappear if
+                                    // the cursor returns to the triggering position.
+                                    app.structural_hint_active = false;
+                                    app.query_input.show_suggestions = false;
+                                    app.query_input.suggestions.clear();
+                                    app.query_input.textarea.input(key);
+                                    // Re-evaluate hint for the new cursor position.
+                                    if !suggestion_active {
+                                        let new_line = app.query_input.textarea.lines()[0].clone();
+                                        let new_col = app.query_input.textarea.cursor().1;
+                                        let new_prefix: String =
+                                            new_line.chars().take(new_col).collect();
+                                        maybe_activate_structural_hint(app, &new_prefix);
+                                    }
                                 } else if !should_ignore_query_input_key(&key)
                                     && app.query_input.textarea.input(key)
                                 {
                                     last_edit_at = Instant::now();
                                     debounce_pending = true;
-                                    match key.code {
-                                        KeyCode::Char('.')
-                                        | KeyCode::Char('|')
-                                        | KeyCode::Char('{')
-                                        | KeyCode::Char('[')
-                                        | KeyCode::Char(',')
-                                        | KeyCode::Char('@') => {
-                                            suggestion_active = true;
-                                            app.structural_hint_active = false;
-                                        }
-                                        KeyCode::Char(c)
-                                            if c.is_alphanumeric()
-                                                || c == '_'
-                                                || c == '-'
-                                                || c == ' ' => {}
-                                        KeyCode::Backspace | KeyCode::Delete => {
-                                            suggestion_active = true;
-                                            app.structural_hint_active = false;
-                                        }
-                                        _ => {
-                                            suggestion_active = false;
-                                            app.structural_hint_active = false;
-                                            app.query_input.show_suggestions = false;
-                                        }
+                                    let query_prefix = current_query_prefix(app);
+                                    let next_suggestion_active = suggestion_mode_for_query_edit(
+                                        key.code,
+                                        &query_prefix,
+                                        suggestion_active,
+                                    );
+                                    suggestion_active = next_suggestion_active;
+                                    app.structural_hint_active = false;
+                                    if !suggestion_active {
+                                        app.query_input.show_suggestions = false;
+                                        app.query_input.suggestions.clear();
                                     }
                                     let new_query = app.query_input.textarea.lines()[0].clone();
                                     clear_dismissed_hint_if_query_changed(app, &new_query);
@@ -1438,22 +1452,31 @@ async fn main_loop<B: ratatui::backend::Backend>(
                         let type_query = Executor::strip_format_op(&q)
                             .map(|(base, _)| base)
                             .unwrap_or_else(|| q.clone());
-                        let pipe_type = type_query.rfind('|').and_then(|p| {
+                        let pipe_type = if let Some(p) = type_query.rfind('|') {
                             let prefix = type_query[..p].trim();
                             if prefix.is_empty() {
-                                return None;
+                                None
+                            } else {
+                                Executor::execute(prefix, &input)
+                                    .ok()
+                                    .and_then(|mut r| {
+                                        if r.is_empty() {
+                                            None
+                                        } else {
+                                            Some(r.swap_remove(0))
+                                        }
+                                    })
+                                    .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
                             }
-                            Executor::execute(prefix, &input)
+                        } else {
+                            // No pipe — infer type from the query result itself so builtin
+                            // suggestions are filtered to what's actually applicable.
+                            main_result
+                                .as_ref()
                                 .ok()
-                                .and_then(|mut r| {
-                                    if r.is_empty() {
-                                        None
-                                    } else {
-                                        Some(r.swap_remove(0))
-                                    }
-                                })
-                                .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
-                        });
+                                .and_then(|(results, _)| results.first())
+                                .map(|v| completions::jq_builtins::jq_type_of(v).to_string())
+                        };
                         (main_result, pipe_type)
                     }));
                     pending_qp = query_prefix.clone();
@@ -1548,6 +1571,25 @@ fn has_non_exact_suggestion_for_prefix(
     suggestions: &[widgets::query_input::Suggestion],
 ) -> bool {
     suggestions.iter().any(|s| s.insert_text != query_prefix)
+}
+
+fn is_field_path_function_call_start(suggestion: &str) -> bool {
+    let trimmed = suggestion.trim_end();
+    if !(trimmed.ends_with('(') || trimmed.ends_with("()")) {
+        return false;
+    }
+    let Some(open_idx) = trimmed.rfind('(') else {
+        return false;
+    };
+    let before = trimmed[..open_idx].trim_end();
+    let fn_name = before
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .rfind(|s| !s.is_empty())
+        .unwrap_or("");
+    matches!(
+        fn_name,
+        "sort_by" | "group_by" | "unique_by" | "min_by" | "max_by" | "del" | "path"
+    )
 }
 
 fn right_pane_copy_text(app: &App<'_>) -> String {
@@ -1657,6 +1699,52 @@ fn open_suggestions_from_structural_hint(
             0
         };
         app.query_input.clamp_scroll();
+    }
+}
+
+fn is_inside_double_quoted_string(query_prefix: &str) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in query_prefix.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+        }
+    }
+
+    in_string
+}
+
+fn suggestion_mode_for_query_edit(
+    key_code: KeyCode,
+    query_prefix: &str,
+    current_active: bool,
+) -> bool {
+    if is_inside_double_quoted_string(query_prefix) {
+        return false;
+    }
+
+    match key_code {
+        KeyCode::Char('.')
+        | KeyCode::Char('|')
+        | KeyCode::Char('{')
+        | KeyCode::Char('[')
+        | KeyCode::Char(',')
+        | KeyCode::Char('@')
+        | KeyCode::Backspace
+        | KeyCode::Delete => true,
+        KeyCode::Char(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == ' ' => {
+            current_active
+        }
+        _ => false,
     }
 }
 
@@ -1980,6 +2068,8 @@ fn build_lsp_suggestions(
 fn cursor_col_after_accept(suggestion: &str) -> u16 {
     if let Some(p) = suggestion.rfind("(\"") {
         (p + 2) as u16
+    } else if suggestion.ends_with(")") && suggestion.contains('(') {
+        (suggestion.rfind('(').unwrap_or(0) + 1) as u16
     } else {
         suggestion.chars().count() as u16
     }
@@ -2202,6 +2292,43 @@ mod tests {
     }
 
     #[test]
+    fn cursor_movement_dismisses_structural_hint_without_suppressing_reappearance() {
+        // Simulate the state after the [] ghost suggestion has appeared.
+        let mut app = App::new();
+        app.structural_hint_active = true;
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "[]".to_string(),
+            detail: None,
+            insert_text: ".items[]".to_string(),
+        }];
+
+        // Simulate what the cursor-movement handler does: clear without
+        // setting dismissed_hint_query (unlike Esc which sets it).
+        app.structural_hint_active = false;
+        app.query_input.show_suggestions = false;
+        app.query_input.suggestions.clear();
+
+        assert!(
+            !app.structural_hint_active,
+            "hint should be cleared after cursor move"
+        );
+        assert!(
+            !app.query_input.show_suggestions,
+            "dropdown should be hidden"
+        );
+        assert!(
+            app.query_input.suggestions.is_empty(),
+            "suggestions should be cleared"
+        );
+        // dismissed_hint_query must NOT be set — hint must be allowed to reappear
+        assert!(
+            app.dismissed_hint_query.is_none(),
+            "cursor movement must not suppress hint reappearance"
+        );
+    }
+
+    #[test]
     fn esc_dismisses_structural_hint_and_sets_dismissed_query() {
         let mut app = App::new();
         app.structural_hint_active = true;
@@ -2221,6 +2348,94 @@ mod tests {
     }
 
     #[test]
+    fn hint_reappears_when_cursor_returns_to_triggering_position() {
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: br#"{"items":[{"id":1}]}"#.to_vec(),
+            json_input: serde_json::json!({"items": [{"id": 1}]}),
+            source_label: "test".to_string(),
+        });
+
+        // Hint is showing for ".items"
+        maybe_activate_structural_hint(&mut app, ".items");
+        assert!(
+            app.structural_hint_active,
+            "hint should be active at .items"
+        );
+
+        // Cursor moves left — hint clears without setting dismissed_hint_query
+        app.structural_hint_active = false;
+        app.query_input.show_suggestions = false;
+        app.query_input.suggestions.clear();
+        assert!(app.dismissed_hint_query.is_none());
+
+        // Cursor moves back to ".items" — hint must reappear
+        let reactivated = maybe_activate_structural_hint(&mut app, ".items");
+        assert!(
+            reactivated,
+            "hint should reappear when cursor returns to .items"
+        );
+        assert!(app.structural_hint_active);
+        assert!(app.query_input.show_suggestions);
+        assert!(!app.query_input.suggestions.is_empty());
+    }
+
+    #[test]
+    fn builtins_filtered_to_string_type_when_pipe_context_is_string() {
+        let input = serde_json::json!({"name": "Alice"});
+        // Use a pipe-terminated prefix so the token is empty and all type-filtered
+        // builtins are candidates (token="" matches everything).
+        let string_suggestions = compute_suggestions(".name | ", Some(&input), &[], Some("string"));
+        let all_suggestions = compute_suggestions(".name | ", Some(&input), &[], None);
+
+        assert!(
+            string_suggestions.len() < all_suggestions.len(),
+            "string-typed suggestions ({}) should be fewer than unfiltered ({})",
+            string_suggestions.len(),
+            all_suggestions.len()
+        );
+
+        // ascii_upcase is a string-only builtin — must appear in string context
+        assert!(
+            string_suggestions.iter().any(|s| s.label == "ascii_upcase"),
+            "ascii_upcase should be suggested for string context"
+        );
+
+        // length applies to any type — must appear in both
+        assert!(
+            string_suggestions.iter().any(|s| s.label == "length"),
+            "length should be suggested for string context"
+        );
+        assert!(
+            all_suggestions.iter().any(|s| s.label == "length"),
+            "length should be suggested with no context"
+        );
+
+        // keys is object/array only — must NOT appear in string context
+        assert!(
+            !string_suggestions.iter().any(|s| s.label == "keys"),
+            "keys should not be suggested for string context"
+        );
+    }
+
+    #[test]
+    fn builtins_filtered_to_array_type_when_pipe_context_is_array() {
+        let input = serde_json::json!({"items": [1, 2, 3]});
+        let array_suggestions = compute_suggestions(".items | ", Some(&input), &[], Some("array"));
+
+        // map is array-only — must appear
+        assert!(
+            array_suggestions.iter().any(|s| s.label.starts_with("map")),
+            "map should be suggested for array context"
+        );
+        // ascii_upcase is string-only — must NOT appear
+        assert!(
+            !array_suggestions.iter().any(|s| s.label == "ascii_upcase"),
+            "ascii_upcase should not be suggested for array context"
+        );
+    }
+
+    #[test]
     fn structural_hint_resets_suggestion_index_to_zero() {
         let mut app = App::new();
         app.executor = Some(Executor {
@@ -2236,5 +2451,60 @@ mod tests {
         assert!(activated);
         assert_eq!(app.query_input.suggestion_index, 0);
         assert_eq!(app.query_input.suggestion_scroll, 0);
+    }
+
+    #[test]
+    fn cursor_position_enters_parentheses_for_field_path_functions() {
+        assert_eq!(cursor_col_after_accept("sort_by()"), 8);
+        assert_eq!(cursor_col_after_accept(".orders | sort_by()"), 18);
+    }
+
+    #[test]
+    fn field_path_function_start_detection_supports_empty_parens() {
+        assert!(is_field_path_function_call_start("sort_by()"));
+        assert!(is_field_path_function_call_start(".orders | del()"));
+        assert!(!is_field_path_function_call_start("map(.)"));
+    }
+
+    #[test]
+    fn detects_when_cursor_is_inside_double_quoted_string() {
+        assert!(is_inside_double_quoted_string(
+            ".orders[].customer.customer_id|ascii_downcase|startswith(\"a"
+        ));
+        assert!(is_inside_double_quoted_string(
+            ".foo|startswith(\"escaped \\\" quote"
+        ));
+    }
+
+    #[test]
+    fn detects_when_cursor_is_outside_double_quoted_string() {
+        assert!(!is_inside_double_quoted_string(
+            ".orders[].customer.customer_id|ascii_downcase|startswith(\"a\")"
+        ));
+        assert!(!is_inside_double_quoted_string(
+            ".orders[].customer.customer_id|ascii_downcase|startswith(\"\")|."
+        ));
+    }
+
+    #[test]
+    fn quoted_text_edit_keeps_suggestions_disabled_across_char_backspace_char() {
+        let q1 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"a";
+        let s1 = suggestion_mode_for_query_edit(KeyCode::Char('a'), q1, true);
+        assert!(!s1);
+
+        let q2 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"";
+        let s2 = suggestion_mode_for_query_edit(KeyCode::Backspace, q2, s1);
+        assert!(!s2);
+
+        let q3 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"b";
+        let s3 = suggestion_mode_for_query_edit(KeyCode::Char('b'), q3, s2);
+        assert!(!s3);
+    }
+
+    #[test]
+    fn punctuation_still_enables_suggestions_outside_string_literals() {
+        let q = ".orders[] | sort_by";
+        assert!(suggestion_mode_for_query_edit(KeyCode::Char('('), q, false) == false);
+        assert!(suggestion_mode_for_query_edit(KeyCode::Char('.'), q, false));
     }
 }
