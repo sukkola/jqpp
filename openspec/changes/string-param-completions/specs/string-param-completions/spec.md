@@ -217,6 +217,12 @@ Tab SHALL extend the currently typed argument toward the next meaningful boundar
 - **THEN** the query rolls back to `startswith("A"`
 - **AND** suggestions remain active
 
+#### Scenario: Tab respects user selection
+- **GIVEN** suggestions are `["apple", "apple pie"]`
+- **WHEN** "apple pie" (the second item) is selected
+- **AND** pressing Tab
+- **THEN** query becomes `startswith("apple pie"` (fully completed)
+
 ### Requirement: Format Operator Restrictions (@tsv, @csv)
 The system SHALL only suggest `@tsv` and `@csv` format operators when the input type matches `"array_scalars"`.
 

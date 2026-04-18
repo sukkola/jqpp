@@ -182,3 +182,9 @@
 - [x] 19.3 Update `handle_query_input_key` to pop and restore state on Esc
 - [x] 19.4 Ensure the stack is cleared when text is modified by other keys or cursor moves
 - [x] 19.5 Update design and spec artifacts
+
+## 20. Respect user selection during Tab expansion
+
+- [x] 20.1 Update `expand_string_param_prefix_with_tab` in `src/accept.rs` to complete fully if an item beyond the first is selected
+- [x] 20.2 Update `expand_string_param_prefix_with_tab` to complete fully if only one candidate exists
+- [x] 20.3 Add unit tests verifying selection-respecting Tab expansion

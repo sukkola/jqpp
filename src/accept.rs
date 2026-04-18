@@ -252,7 +252,11 @@ pub fn expand_string_param_prefix_with_tab(
                 .map(|s| s.as_str())
         })?;
 
-    let extended = if matches!(
+    let extended = if suggestion_index > 0 || candidates.len() == 1 {
+        // If the user has explicitly moved the selection beyond the first item,
+        // OR if there is only one candidate, complete fully to that item.
+        Some(preferred.to_string())
+    } else if matches!(
         ctx.strategy,
         completions::json_context::StringParamStrategy::Suffix
     ) {
@@ -395,5 +399,44 @@ mod tests {
         assert_eq!(s[0].insert_text, ".users[].name|startswith()");
         assert!(starts_context_aware_function_call(&s[0].insert_text));
         assert_eq!(cursor_col_after_accept(&s[0].insert_text), 25);
+    }
+
+    #[test]
+    fn tab_completes_selected_item_fully_if_not_first_item() {
+        let full = "startswith(\"";
+        let cursor = full.chars().count();
+        let suggestions = vec![
+            widgets::query_input::Suggestion {
+                label: "apple".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"apple\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "apple pie".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"apple pie\")".to_string(),
+            },
+        ];
+
+        // If we have selected the second item (index 1), Tab should give us "apple pie" fully,
+        // even though "apple" is shorter and a prefix.
+        let (new_query, _) =
+            expand_string_param_prefix_with_tab(full, cursor, &suggestions, 1).unwrap();
+        assert_eq!(new_query, "startswith(\"apple pie");
+    }
+
+    #[test]
+    fn tab_completes_fully_if_only_one_item() {
+        let full = "startswith(\"ap";
+        let cursor = full.chars().count();
+        let suggestions = vec![widgets::query_input::Suggestion {
+            label: "apple".to_string(),
+            detail: Some("string value".to_string()),
+            insert_text: "startswith(\"apple\")".to_string(),
+        }];
+
+        let (new_query, _) =
+            expand_string_param_prefix_with_tab(full, cursor, &suggestions, 0).unwrap();
+        assert_eq!(new_query, "startswith(\"apple");
     }
 }

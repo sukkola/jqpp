@@ -134,8 +134,10 @@ Candidates are built fresh for each invocation (cheap: string extraction is O(n 
 ### D8: Tab and Enter semantics in string-param contexts
 
 - `Tab` extends the current argument toward the next meaningful boundary:
-  - Prefix-like functions: extend forward to next token boundary.
-  - Suffix-like functions: extend to the next longer suffix that still ends with current input.
+  - If an item beyond the first is explicitly selected, or if there is only one candidate, Tab completes that item fully.
+  - Otherwise, it uses step-wise expansion:
+    - Prefix-like functions: extend forward to next token boundary.
+    - Suffix-like functions: extend to the next longer suffix that still ends with current input.
 - `Enter` commits the currently typed value as a valid call by closing and quoting the argument.
 - `Esc` rolls back the most recent Tab expansion if one exists, otherwise it dismisses suggestions/hints.
 
