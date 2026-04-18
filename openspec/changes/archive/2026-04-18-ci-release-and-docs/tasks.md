@@ -18,9 +18,9 @@
 - [x] 3.1 In `sukkola/homebrew-tap`, create `Formula/jqpp.rb` using `on_macos` block with `on_arm` / `on_intel` architecture selectors (Template created in `homebrew/jqpp.rb`)
 - [x] 3.2 Set archive URLs pointing to the GitHub Release assets (`https://github.com/sukkola/jqpp/releases/download/v{version}/jqpp-{target}.tar.gz`)
 - [x] 3.3 SHA-256 hashes are now filled automatically by the release pipeline
-- [ ] 3.3a Add `HOMEBREW_TAP_TOKEN` secret to the jqpp repo (GitHub PAT with `contents: write` on `sukkola/homebrew-tap`)
+- [x] 3.3a Add `HOMEBREW_TAP_TOKEN` secret to the jqpp repo (GitHub PAT with `contents: write` on `sukkola/homebrew-tap`)
 - [x] 3.4 Add `bin.install "jqpp"` and a `test` block (`system "#{bin}/jqpp", "--version"`)
-- [ ] 3.5 Run `brew audit --strict Formula/jqpp.rb` and fix any issues
+- [x] 3.5 Run `brew audit --strict Formula/jqpp.rb` and fix any issues
 
 ## 4. Demo Recording
 
@@ -32,7 +32,7 @@
 - [x] 4.6 In the tape: type `.` again to show `customer` sub-fields (`name`, `email`); accept `.name`; `Sleep 800ms` to show the result pane updating
 - [x] 4.7 In the tape: clear query (select all, delete), type `.orders[] | .items[] | .` and `Sleep 800ms` to show item-level field completion
 - [x] 4.8 In the tape: clear, type `.orders[] | sel` and `Sleep 600ms` to show `select` builtin suggestion; `Ctrl+C` to exit; `Sleep 500ms`
-- [ ] 4.9 Run `vhs demo/demo.tape` locally, review the GIF, adjust sleeps/steps until pacing feels natural
+- [x] 4.9 Run `vhs demo/demo.tape` locally, review the GIF, adjust sleeps/steps until pacing feels natural
 - [x] 4.10 Create `mise.toml` at repo root with `[tasks.demo]` that runs `vhs demo/demo.tape` from the repo root
 
 ## 5. README
