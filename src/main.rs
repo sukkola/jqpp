@@ -2239,12 +2239,39 @@ fn compute_suggestions(
 
     let token = current_token(query_prefix);
     let fuzzy_token = fuzzy_token_fragment(token);
-    let fuzzy_token_prefix = fuzzy_token_prefix(token);
     let prefix = lsp_pipe_prefix(query_prefix);
-    let query_before_token = query_prefix.strip_suffix(token).unwrap_or(query_prefix);
 
-    let json_completions = if let Some(input) = json_input {
-        completions::json_context::get_completions(query_prefix, input)
+    let (eval_input, eval_tail) = if let Some(input) = json_input {
+        if let Some((head, tail)) = split_at_last_pipe(query_prefix) {
+            let eval_query = Executor::strip_format_op(&head)
+                .map(|(base, _)| base)
+                .unwrap_or(head);
+            let evaluated = Executor::execute(&eval_query, input)
+                .ok()
+                .and_then(|mut r| {
+                    if r.is_empty() {
+                        None
+                    } else {
+                        Some(r.swap_remove(0))
+                    }
+                })
+                .unwrap_or_else(|| input.clone());
+            (Some(evaluated), tail)
+        } else {
+            (Some(input.clone()), query_prefix.to_string())
+        }
+    } else {
+        (None, query_prefix.to_string())
+    };
+
+    let json_completions = if let Some(ref input) = eval_input {
+        completions::json_context::get_completions(&eval_tail, input)
+            .into_iter()
+            .map(|i| completions::CompletionItem {
+                insert_text: format!("{}{}", prefix, i.insert_text),
+                ..i
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -2276,11 +2303,16 @@ fn compute_suggestions(
 
     let fuzzy_json_completions: Vec<completions::CompletionItem> = if fuzzy_token.is_empty() {
         Vec::new()
-    } else if let Some(input) = json_input {
-        let json_context_query = format!("{}{}", query_before_token, fuzzy_token_prefix);
-        let all_json_fields =
-            completions::json_context::get_completions(&json_context_query, input);
+    } else if let Some(ref input) = eval_input {
+        let fuzzy_tail_prefix = eval_tail.strip_suffix(fuzzy_token).unwrap_or(&eval_tail);
+        let all_json_fields = completions::json_context::get_completions(fuzzy_tail_prefix, input);
         completions::fuzzy::fuzzy_completions(fuzzy_token, &all_json_fields)
+            .into_iter()
+            .map(|i| completions::CompletionItem {
+                insert_text: format!("{}{}", prefix, i.insert_text),
+                ..i
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -2399,6 +2431,16 @@ fn evaluated_string_param_input(
     }
 }
 
+fn split_at_last_pipe(query: &str) -> Option<(String, String)> {
+    if let Some(p) = query.rfind('|') {
+        let head = query[..p].to_string();
+        let tail = query[p + 1..].to_string();
+        Some((head, tail))
+    } else {
+        None
+    }
+}
+
 fn split_string_param_query_prefix(query: &str) -> Option<(String, String)> {
     completions::json_context::string_param_context(query)?;
 
@@ -2462,11 +2504,6 @@ fn fuzzy_token_fragment(token: &str) -> &str {
         .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .next()
         .unwrap_or("")
-}
-
-fn fuzzy_token_prefix(token: &str) -> &str {
-    let fragment = fuzzy_token_fragment(token);
-    token.strip_suffix(fragment).unwrap_or(token)
 }
 
 fn should_offer_builtin_fuzzy(token: &str) -> bool {
@@ -3087,6 +3124,46 @@ mod tests {
         let q3 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"b";
         let s3 = suggestion_mode_for_query_edit(KeyCode::Char('b'), q3, s2);
         assert!(s3);
+    }
+
+    #[test]
+    fn suggestions_for_complex_pipe_chain_in_obj_constructor() {
+        let input = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string("examples/string-functions-kitchen-sink.json").unwrap(),
+        )
+        .unwrap();
+
+        let suggestions = compute_suggestions(
+            ".users | sort_by([.role, .email])[] | {",
+            Some(&input),
+            &[],
+            None,
+        );
+
+        assert!(
+            suggestions.iter().any(|s| s.label == "role"),
+            "Expected 'role' in suggestions, but got: {:?}",
+            suggestions
+        );
+        assert!(
+            suggestions.iter().any(|s| s.label == "email"),
+            "Expected 'email' in suggestions"
+        );
+    }
+
+    #[test]
+    fn suggestions_for_nested_array_field_access() {
+        let input = serde_json::json!({
+            "orders": [{"customer": {"id": 1, "name": "Alice"}}]
+        });
+
+        let suggestions = compute_suggestions(".orders[] | .customer | {", Some(&input), &[], None);
+
+        assert!(
+            suggestions.iter().any(|s| s.label == "name"),
+            "Expected 'name' in suggestions, but got: {:?}",
+            suggestions
+        );
     }
 
     #[test]

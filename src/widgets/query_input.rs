@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tui_textarea::TextArea;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Suggestion {
     pub label: String,
     pub detail: Option<String>,
