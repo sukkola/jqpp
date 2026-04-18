@@ -11,6 +11,7 @@ pub enum InputType {
     String,
     Number,
     Array,
+    ArrayOfScalars,
     Object,
     StringOrArray, // length, indices, contains, …
     ArrayOrObject, // keys, values, has, map_values, …
@@ -25,10 +26,15 @@ impl InputType {
             InputType::NonBoolean => jq_type != "boolean",
             InputType::String => jq_type == "string",
             InputType::Number => jq_type == "number",
-            InputType::Array => jq_type == "array",
+            InputType::Array => jq_type == "array" || jq_type == "array_scalars",
+            InputType::ArrayOfScalars => jq_type == "array_scalars",
             InputType::Object => jq_type == "object",
-            InputType::StringOrArray => jq_type == "string" || jq_type == "array",
-            InputType::ArrayOrObject => jq_type == "array" || jq_type == "object",
+            InputType::StringOrArray => {
+                jq_type == "string" || jq_type == "array" || jq_type == "array_scalars"
+            }
+            InputType::ArrayOrObject => {
+                jq_type == "array" || jq_type == "array_scalars" || jq_type == "object"
+            }
         }
     }
 }
@@ -49,36 +55,16 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "string → uppercase",
         InputType::String,
     ),
-    (
-        "ltrimstr",
-        "ltrimstr(\"\")",
-        "remove prefix",
-        InputType::String,
-    ),
-    (
-        "rtrimstr",
-        "rtrimstr(\"\")",
-        "remove suffix",
-        InputType::String,
-    ),
+    ("ltrimstr", "ltrimstr()", "remove prefix", InputType::String),
+    ("rtrimstr", "rtrimstr()", "remove suffix", InputType::String),
     (
         "startswith",
-        "startswith(\"\")",
+        "startswith()",
         "string → bool",
         InputType::String,
     ),
-    (
-        "endswith",
-        "endswith(\"\")",
-        "string → bool",
-        InputType::String,
-    ),
-    (
-        "split",
-        "split(\",\")",
-        "split on separator",
-        InputType::String,
-    ),
+    ("endswith", "endswith()", "string → bool", InputType::String),
+    ("split", "split()", "split on separator", InputType::String),
     (
         "test",
         "test(\"\")",
@@ -133,8 +119,18 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ("@uri", "@uri", "percent-encode for URI", InputType::String),
     ("@html", "@html", "escape HTML entities", InputType::String),
     ("@sh", "@sh", "shell-quote string", InputType::String),
-    ("@csv", "@csv", "encode row as CSV", InputType::Array),
-    ("@tsv", "@tsv", "encode row as TSV", InputType::Array),
+    (
+        "@csv",
+        "@csv",
+        "encode row as CSV",
+        InputType::ArrayOfScalars,
+    ),
+    (
+        "@tsv",
+        "@tsv",
+        "encode row as TSV",
+        InputType::ArrayOfScalars,
+    ),
     // ── numbers ───────────────────────────────────────────────────────────────
     ("floor", "floor", "round down to integer", InputType::Number),
     ("ceil", "ceil", "round up to integer", InputType::Number),
@@ -247,7 +243,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "implode",
         "implode",
         "[codepoints] → string",
-        InputType::Array,
+        InputType::ArrayOfScalars,
     ),
     (
         "from_entries",
@@ -320,7 +316,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     (
         "contains",
-        "contains({})",
+        "contains()",
         "test containment",
         InputType::ArrayOrObject,
     ),
@@ -335,19 +331,19 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     (
         "indices",
-        "indices(\"\")",
+        "indices()",
         "all indices of value",
         InputType::StringOrArray,
     ),
     (
         "index",
-        "index(\"\")",
+        "index()",
         "first index of value",
         InputType::StringOrArray,
     ),
     (
         "rindex",
-        "rindex(\"\")",
+        "rindex()",
         "last index of value",
         InputType::StringOrArray,
     ),
@@ -454,12 +450,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ("@text", "@text", "same as tostring", InputType::Any),
     ("input", "input", "next input value", InputType::Any),
     ("inputs", "inputs", "remaining input values", InputType::Any),
-    (
-        "contains",
-        "contains(null)",
-        "test containment",
-        InputType::Any,
-    ),
+    ("contains", "contains()", "test containment", InputType::Any),
     (
         "inside",
         "inside(null)",
@@ -521,7 +512,21 @@ pub fn jq_type_of(val: &serde_json::Value) -> &'static str {
     match val {
         serde_json::Value::String(_) => "string",
         serde_json::Value::Number(_) => "number",
-        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Array(arr) => {
+            if arr.iter().all(|v| {
+                matches!(
+                    v,
+                    serde_json::Value::String(_)
+                        | serde_json::Value::Number(_)
+                        | serde_json::Value::Bool(_)
+                        | serde_json::Value::Null
+                )
+            }) {
+                "array_scalars"
+            } else {
+                "array"
+            }
+        }
         serde_json::Value::Object(_) => "object",
         serde_json::Value::Bool(_) => "boolean",
         serde_json::Value::Null => "null",
@@ -662,11 +667,39 @@ mod tests {
     }
 
     #[test]
+    fn tsv_excluded_for_array_of_objects() {
+        use serde_json::json;
+        let array_of_objects = json!([{"a": 1}]);
+        let jq_type = jq_type_of(&array_of_objects);
+        assert_eq!(jq_type, "array");
+
+        let c = get_completions("", Some(jq_type));
+        assert!(
+            !c.iter().any(|i| i.label == "@tsv"),
+            "@tsv must NOT appear for array of objects"
+        );
+    }
+
+    #[test]
+    fn tsv_appears_for_array_of_scalars() {
+        use serde_json::json;
+        let array_of_scalars = json!(["a", 1, true, null]);
+        let jq_type = jq_type_of(&array_of_scalars);
+        assert_eq!(jq_type, "array_scalars");
+
+        let c = get_completions("", Some(jq_type));
+        assert!(
+            c.iter().any(|i| i.label == "@tsv"),
+            "@tsv must appear for array of scalars"
+        );
+    }
+
+    #[test]
     fn jq_type_of_covers_all_variants() {
         use serde_json::json;
         assert_eq!(jq_type_of(&json!("hi")), "string");
         assert_eq!(jq_type_of(&json!(42)), "number");
-        assert_eq!(jq_type_of(&json!([])), "array");
+        assert_eq!(jq_type_of(&json!([])), "array_scalars");
         assert_eq!(jq_type_of(&json!({})), "object");
         assert_eq!(jq_type_of(&json!(true)), "boolean");
         assert_eq!(jq_type_of(&json!(null)), "null");
@@ -683,10 +716,85 @@ mod tests {
     fn insert_text_for_split_has_parens() {
         let c = get_completions("split", Some("string"));
         let item = c.iter().find(|i| i.label == "split").unwrap();
-        assert!(
-            item.insert_text.contains("("),
-            "split insert_text must include parens: {}",
-            item.insert_text
+        assert_eq!(item.insert_text, "split()");
+    }
+
+    #[test]
+    fn string_param_builtins_use_empty_parens_insert_text() {
+        let string = get_completions("", Some("string"));
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "startswith")
+                .unwrap()
+                .insert_text,
+            "startswith()"
+        );
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "endswith")
+                .unwrap()
+                .insert_text,
+            "endswith()"
+        );
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "ltrimstr")
+                .unwrap()
+                .insert_text,
+            "ltrimstr()"
+        );
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "rtrimstr")
+                .unwrap()
+                .insert_text,
+            "rtrimstr()"
+        );
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "split")
+                .unwrap()
+                .insert_text,
+            "split()"
+        );
+
+        let str_or_arr = get_completions("", Some("string"));
+        assert_eq!(
+            str_or_arr
+                .iter()
+                .find(|i| i.label == "contains")
+                .unwrap()
+                .insert_text,
+            "contains()"
+        );
+        assert_eq!(
+            str_or_arr
+                .iter()
+                .find(|i| i.label == "index")
+                .unwrap()
+                .insert_text,
+            "index()"
+        );
+        assert_eq!(
+            str_or_arr
+                .iter()
+                .find(|i| i.label == "rindex")
+                .unwrap()
+                .insert_text,
+            "rindex()"
+        );
+        assert_eq!(
+            str_or_arr
+                .iter()
+                .find(|i| i.label == "indices")
+                .unwrap()
+                .insert_text,
+            "indices()"
         );
     }
 

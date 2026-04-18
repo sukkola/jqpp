@@ -343,6 +343,20 @@ fn selected_output(app: &App<'_>, mode: OutputMode) -> Option<String> {
     }
 }
 
+fn parse_input_as_json_or_string(input_data: &[u8]) -> Result<serde_json::Value> {
+    if let Ok(json) = serde_json::from_slice(input_data) {
+        return Ok(json);
+    }
+
+    let text = String::from_utf8(input_data.to_vec())
+        .context("Failed to parse input as JSON or UTF-8 text")?;
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.chars().any(|c| c.is_whitespace()) {
+        return Err(anyhow::anyhow!("Failed to parse input as JSON"));
+    }
+    Ok(serde_json::Value::String(trimmed.to_string()))
+}
+
 fn actual_main(args: Args) -> Result<()> {
     setup_panic_hook(args.debug);
     let output_mode = output_mode_from_args(&args);
@@ -378,8 +392,7 @@ fn actual_main(args: Args) -> Result<()> {
     }
 
     let executor = if !input_data.is_empty() {
-        let json_input: serde_json::Value =
-            serde_json::from_slice(&input_data).context("Failed to parse input as JSON")?;
+        let json_input = parse_input_as_json_or_string(&input_data)?;
         Some(Executor {
             raw_input: input_data,
             json_input,
@@ -848,17 +861,43 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                     if app.query_input.show_suggestions
                                         && !app.query_input.suggestions.is_empty()
                                     {
-                                        let suggestion = app.query_input.suggestions
-                                            [app.query_input.suggestion_index]
-                                            .insert_text
-                                            .clone();
-                                        let starts_param_field_context =
-                                            is_field_path_function_call_start(&suggestion);
                                         let cur = app.query_input.textarea.cursor().1;
                                         let full = app.query_input.textarea.lines()[0].clone();
-                                        let suffix: String = full.chars().skip(cur).collect();
-                                        let new_text = format!("{}{}", suggestion, suffix);
-                                        let col = cursor_col_after_accept(&suggestion);
+                                        if let Some((new_text, col)) =
+                                            commit_current_string_param_input(&full, cur)
+                                        {
+                                            app.query_input.textarea =
+                                                tui_textarea::TextArea::from(vec![new_text]);
+                                            app.query_input.textarea.set_block(
+                                                ratatui::widgets::Block::default()
+                                                    .title(" Query ")
+                                                    .borders(ratatui::widgets::Borders::ALL),
+                                            );
+                                            app.query_input.textarea.set_cursor_line_style(
+                                                ratatui::style::Style::default(),
+                                            );
+                                            app.query_input.textarea.move_cursor(
+                                                tui_textarea::CursorMove::Jump(0, col),
+                                            );
+                                            app.query_input.show_suggestions = false;
+                                            suggestion_active = false;
+                                            lsp_completions.clear();
+                                            cached_pipe_type = None;
+                                            last_edit_at = Instant::now() - debounce_duration;
+                                            debounce_pending = true;
+                                            continue;
+                                        }
+
+                                        let selected = app.query_input.suggestions
+                                            [app.query_input.suggestion_index]
+                                            .clone();
+                                        let suggestion = selected.insert_text;
+                                        let (new_text, col) = apply_selected_suggestion(
+                                            &suggestion,
+                                            selected.detail.as_deref(),
+                                            &full,
+                                            cur,
+                                        );
                                         app.query_input.textarea =
                                             tui_textarea::TextArea::from(vec![new_text]);
                                         app.query_input.textarea.set_block(
@@ -873,7 +912,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             .textarea
                                             .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                         app.query_input.show_suggestions = false;
-                                        suggestion_active = starts_param_field_context;
+                                        suggestion_active =
+                                            starts_context_aware_function_call(&suggestion);
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_edit_at = Instant::now() - debounce_duration;
@@ -962,17 +1002,46 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                         && !app.query_input.suggestions.is_empty()
                                         && is_action(keymap::Action::AcceptSuggestion)
                                     {
-                                        let suggestion = app.query_input.suggestions
-                                            [app.query_input.suggestion_index]
-                                            .insert_text
-                                            .clone();
-                                        let starts_param_field_context =
-                                            is_field_path_function_call_start(&suggestion);
                                         let cur = app.query_input.textarea.cursor().1;
                                         let full = app.query_input.textarea.lines()[0].clone();
-                                        let suffix: String = full.chars().skip(cur).collect();
-                                        let new_text = format!("{}{}", suggestion, suffix);
-                                        let col = cursor_col_after_accept(&suggestion);
+                                        if let Some((new_text, col)) =
+                                            expand_string_param_prefix_with_tab(
+                                                &full,
+                                                cur,
+                                                &app.query_input.suggestions,
+                                                app.query_input.suggestion_index,
+                                            )
+                                        {
+                                            app.query_input.textarea =
+                                                tui_textarea::TextArea::from(vec![new_text]);
+                                            app.query_input.textarea.set_block(
+                                                ratatui::widgets::Block::default()
+                                                    .title(" Query ")
+                                                    .borders(ratatui::widgets::Borders::ALL),
+                                            );
+                                            app.query_input.textarea.set_cursor_line_style(
+                                                ratatui::style::Style::default(),
+                                            );
+                                            app.query_input.textarea.move_cursor(
+                                                tui_textarea::CursorMove::Jump(0, col),
+                                            );
+                                            app.query_input.show_suggestions = true;
+                                            suggestion_active = true;
+                                            last_edit_at = Instant::now() - debounce_duration;
+                                            debounce_pending = true;
+                                            continue;
+                                        }
+
+                                        let selected = app.query_input.suggestions
+                                            [app.query_input.suggestion_index]
+                                            .clone();
+                                        let suggestion = selected.insert_text;
+                                        let (new_text, col) = apply_selected_suggestion(
+                                            &suggestion,
+                                            selected.detail.as_deref(),
+                                            &full,
+                                            cur,
+                                        );
                                         app.query_input.textarea =
                                             tui_textarea::TextArea::from(vec![new_text]);
                                         app.query_input.textarea.set_block(
@@ -987,7 +1056,8 @@ async fn main_loop<B: ratatui::backend::Backend>(
                                             .textarea
                                             .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                                         app.query_input.show_suggestions = false;
-                                        suggestion_active = starts_param_field_context;
+                                        suggestion_active =
+                                            starts_context_aware_function_call(&suggestion);
                                         lsp_completions.clear();
                                         cached_pipe_type = None;
                                         last_edit_at = Instant::now() - debounce_duration;
@@ -1592,6 +1662,204 @@ fn is_field_path_function_call_start(suggestion: &str) -> bool {
     )
 }
 
+fn starts_context_aware_function_call(suggestion: &str) -> bool {
+    is_field_path_function_call_start(suggestion)
+        || completions::json_context::string_param_context(suggestion).is_some()
+        || suggestion
+            .strip_suffix(')')
+            .map(|s| completions::json_context::string_param_context(s).is_some())
+            .unwrap_or(false)
+}
+
+fn apply_suggestion_with_suffix(suggestion: &str, suffix: &str) -> String {
+    let suffix = if suggestion.ends_with(')') && suffix.starts_with(')') {
+        &suffix[1..]
+    } else {
+        suffix
+    };
+    format!("{}{}", suggestion, suffix)
+}
+
+fn is_string_param_value_suggestion(detail: Option<&str>) -> bool {
+    detail
+        .map(|d| d == "string value" || d == "~string value")
+        .unwrap_or(false)
+}
+
+fn apply_selected_suggestion(
+    insert_text: &str,
+    detail: Option<&str>,
+    full_query: &str,
+    cursor_col: usize,
+) -> (String, u16) {
+    let query_prefix: String = full_query.chars().take(cursor_col).collect();
+    let mut suffix: String = full_query.chars().skip(cursor_col).collect();
+
+    if is_string_param_value_suggestion(detail)
+        && completions::json_context::string_param_context(&query_prefix).is_some()
+    {
+        if let Some(close_idx) = suffix.find(')') {
+            suffix = suffix[close_idx + 1..].to_string();
+        } else {
+            suffix.clear();
+        }
+        let merged = format!("{}{}", insert_text, suffix);
+        return (merged, insert_text.chars().count() as u16);
+    }
+
+    let merged = apply_suggestion_with_suffix(insert_text, &suffix);
+    let col = if starts_context_aware_function_call(insert_text) {
+        cursor_col_after_accept(insert_text)
+    } else {
+        insert_text.chars().count() as u16
+    };
+    (merged, col)
+}
+
+fn find_unmatched_open_paren(query: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (idx, ch) in query.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn commit_current_string_param_input(full_query: &str, cursor_col: usize) -> Option<(String, u16)> {
+    let query_prefix: String = full_query.chars().take(cursor_col).collect();
+    let ctx = completions::json_context::string_param_context(&query_prefix)?;
+    let open = find_unmatched_open_paren(&query_prefix)?;
+    let escaped = ctx.inner_prefix.replace('"', "\\\"");
+    let committed = format!("{}\"{}\")", &query_prefix[..open + 1], escaped);
+    let suffix: String = full_query.chars().skip(cursor_col).collect();
+    let tail = suffix
+        .find(')')
+        .map(|i| suffix[i + 1..].to_string())
+        .unwrap_or_default();
+    let new_query = format!("{}{}", committed, tail);
+    Some((new_query, committed.chars().count() as u16))
+}
+
+fn longest_common_prefix(values: &[String]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for value in values.iter().skip(1) {
+        let mut bytes = 0usize;
+        for (a, b) in prefix.chars().zip(value.chars()) {
+            if a != b {
+                break;
+            }
+            bytes += a.len_utf8();
+        }
+        prefix.truncate(bytes);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix
+}
+
+fn is_string_token_delim(ch: char) -> bool {
+    matches!(
+        ch,
+        '\\' | '-' | '_' | '/' | '.' | ' ' | '\t' | ',' | '|' | '@'
+    )
+}
+
+fn extend_to_next_token_boundary(current: &str, candidate: &str) -> Option<String> {
+    if !candidate.starts_with(current) || candidate == current {
+        return None;
+    }
+
+    let mut out = String::from(current);
+    let mut seen_non_delim = false;
+    for ch in candidate[current.len()..].chars() {
+        if seen_non_delim && is_string_token_delim(ch) {
+            break;
+        }
+        if !is_string_token_delim(ch) {
+            seen_non_delim = true;
+        }
+        out.push(ch);
+    }
+
+    if out.len() > current.len() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn expand_string_param_prefix_with_tab(
+    full_query: &str,
+    cursor_col: usize,
+    suggestions: &[widgets::query_input::Suggestion],
+    suggestion_index: usize,
+) -> Option<(String, u16)> {
+    let query_prefix: String = full_query.chars().take(cursor_col).collect();
+    let ctx = completions::json_context::string_param_context(&query_prefix)?;
+    let open = find_unmatched_open_paren(&query_prefix)?;
+
+    let candidates: Vec<String> = suggestions
+        .iter()
+        .filter(|s| is_string_param_value_suggestion(s.detail.as_deref()))
+        .map(|s| s.label.clone())
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let preferred = suggestions
+        .get(suggestion_index)
+        .filter(|s| is_string_param_value_suggestion(s.detail.as_deref()))
+        .map(|s| s.label.as_str())
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|c| c.starts_with(ctx.inner_prefix))
+                .map(|s| s.as_str())
+        })?;
+
+    let extended = if matches!(
+        ctx.strategy,
+        completions::json_context::StringParamStrategy::Suffix
+    ) {
+        candidates
+            .iter()
+            .filter(|c| c.len() > ctx.inner_prefix.len() && c.ends_with(ctx.inner_prefix))
+            .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+            .cloned()
+    } else {
+        extend_to_next_token_boundary(ctx.inner_prefix, preferred).or_else(|| {
+            let lcp = longest_common_prefix(&candidates);
+            if lcp.chars().count() > ctx.inner_prefix.chars().count() {
+                Some(lcp)
+            } else {
+                None
+            }
+        })
+    }?;
+    if extended.chars().count() <= ctx.inner_prefix.chars().count() {
+        return None;
+    }
+
+    let escaped = extended.replace('"', "\\\"");
+    let expanded = format!("{}\"{}", &query_prefix[..open + 1], escaped);
+    let suffix: String = full_query.chars().skip(cursor_col).collect();
+    let new_query = format!("{}{}", expanded, suffix);
+    Some((new_query, expanded.chars().count() as u16))
+}
+
 fn right_pane_copy_text(app: &App<'_>) -> String {
     if !app.results.is_empty() {
         Executor::format_results(&app.results, app.raw_output)
@@ -1622,7 +1890,7 @@ fn completion_items_to_suggestions(
 }
 
 fn maybe_activate_structural_hint(app: &mut App<'_>, query_prefix: &str) -> bool {
-    if query_prefix.is_empty() || app.dismissed_hint_query.as_deref() == Some(query_prefix) {
+    if app.dismissed_hint_query.as_deref() == Some(query_prefix) {
         return false;
     }
 
@@ -1728,7 +1996,9 @@ fn suggestion_mode_for_query_edit(
     query_prefix: &str,
     current_active: bool,
 ) -> bool {
-    if is_inside_double_quoted_string(query_prefix) {
+    if is_inside_double_quoted_string(query_prefix)
+        && completions::json_context::string_param_context(query_prefix).is_none()
+    {
         return false;
     }
 
@@ -1922,8 +2192,49 @@ fn compute_suggestions(
     lsp_completions: &[completions::CompletionItem],
     pipe_context_type: Option<&str>,
 ) -> Vec<widgets::query_input::Suggestion> {
-    if is_inside_string_literal(query_prefix) {
+    let in_string_param_context =
+        completions::json_context::string_param_context(query_prefix).is_some();
+    if is_inside_string_literal(query_prefix) && !in_string_param_context {
         return Vec::new();
+    }
+
+    if in_string_param_context {
+        let json_only = if let Some(input) = json_input {
+            let evaluated =
+                evaluated_string_param_input(query_prefix, input).unwrap_or_else(|| input.clone());
+            if let Some((head, tail)) = split_string_param_query_prefix(query_prefix) {
+                completions::json_context::get_completions(&tail, &evaluated)
+                    .into_iter()
+                    .map(|i| completions::CompletionItem {
+                        insert_text: format!("{}{}", head, i.insert_text),
+                        ..i
+                    })
+                    .collect()
+            } else {
+                completions::json_context::get_completions(query_prefix, &evaluated)
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut deduped: Vec<completions::CompletionItem> = Vec::new();
+        for item in json_only {
+            if !deduped
+                .iter()
+                .any(|d| d.label == item.label && d.insert_text == item.insert_text)
+            {
+                deduped.push(item);
+            }
+        }
+
+        return deduped
+            .into_iter()
+            .map(|i| widgets::query_input::Suggestion {
+                label: i.label,
+                detail: i.detail,
+                insert_text: i.insert_text,
+            })
+            .collect();
     }
 
     let token = current_token(query_prefix);
@@ -2021,6 +2332,98 @@ fn compute_suggestions(
         .collect()
 }
 
+fn active_string_param_prefix_query(query: &str) -> Option<String> {
+    completions::json_context::string_param_context(query)?;
+
+    let mut depth: i32 = 0;
+    let mut open_paren: Option<usize> = None;
+    for (idx, ch) in query.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 {
+                    open_paren = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open_paren?;
+
+    let before_open = query[..open].trim_end();
+    if before_open.is_empty() {
+        return None;
+    }
+
+    let fn_end = before_open.len();
+    let mut fn_start = fn_end;
+    for (idx, ch) in before_open.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            fn_start = idx;
+        } else {
+            break;
+        }
+    }
+    if fn_start == fn_end {
+        return None;
+    }
+
+    let prefix = before_open[..fn_start]
+        .trim_end()
+        .trim_end_matches('|')
+        .trim_end();
+    if prefix.is_empty() {
+        None
+    } else {
+        Some(prefix.to_string())
+    }
+}
+
+fn evaluated_string_param_input(
+    query_prefix: &str,
+    input: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let prefix = active_string_param_prefix_query(query_prefix)?;
+    let eval_query = Executor::strip_format_op(&prefix)
+        .map(|(base, _)| base)
+        .unwrap_or(prefix);
+    let mut out = Executor::execute(&eval_query, input).ok()?;
+    if out.is_empty() {
+        Some(serde_json::Value::Null)
+    } else if out.len() == 1 {
+        Some(out.swap_remove(0))
+    } else {
+        Some(serde_json::Value::Array(out))
+    }
+}
+
+fn split_string_param_query_prefix(query: &str) -> Option<(String, String)> {
+    completions::json_context::string_param_context(query)?;
+
+    let open = find_unmatched_open_paren(query)?;
+    let before_open = query[..open].trim_end();
+    if before_open.is_empty() {
+        return None;
+    }
+
+    let fn_end = before_open.len();
+    let mut fn_start = fn_end;
+    for (idx, ch) in before_open.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            fn_start = idx;
+        } else {
+            break;
+        }
+    }
+    if fn_start == fn_end {
+        return None;
+    }
+
+    Some((query[..fn_start].to_string(), query[fn_start..].to_string()))
+}
+
 fn is_inside_string_literal(query: &str) -> bool {
     let mut quote: Option<char> = None;
     let mut escaped = false;
@@ -2079,6 +2482,56 @@ fn lsp_pipe_prefix(query: &str) -> &str {
     }
 }
 
+fn normalize_lsp_insert_text(insert_text: &str, label: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = insert_text.chars().collect();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '$' {
+            if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
+                i += 2;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                continue;
+            }
+
+            if i + 1 < chars.len() && chars[i + 1] == '{' {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '}' {
+                    i = j + 1;
+                    continue;
+                }
+                if j < chars.len() && chars[j] == ':' {
+                    j += 1;
+                    while j < chars.len() && chars[j] != '}' {
+                        out.push(chars[j]);
+                        j += 1;
+                    }
+                    if j < chars.len() && chars[j] == '}' {
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        out.push(ch);
+        i += 1;
+    }
+
+    if out.is_empty() {
+        label.to_string()
+    } else {
+        out
+    }
+}
+
 fn build_lsp_suggestions(
     cache: &[completions::CompletionItem],
     token: &str,
@@ -2088,7 +2541,11 @@ fn build_lsp_suggestions(
         .iter()
         .filter(|c| c.label.starts_with(token))
         .map(|c| completions::CompletionItem {
-            insert_text: format!("{}{}", prefix, c.insert_text),
+            insert_text: format!(
+                "{}{}",
+                prefix,
+                normalize_lsp_insert_text(&c.insert_text, &c.label)
+            ),
             ..c.clone()
         })
         .collect()
@@ -2097,8 +2554,8 @@ fn build_lsp_suggestions(
 fn cursor_col_after_accept(suggestion: &str) -> u16 {
     if let Some(p) = suggestion.rfind("(\"") {
         (p + 2) as u16
-    } else if suggestion.ends_with(")") && suggestion.contains('(') {
-        (suggestion.rfind('(').unwrap_or(0) + 1) as u16
+    } else if suggestion.ends_with("()") {
+        suggestion.chars().count().saturating_sub(1) as u16
     } else {
         suggestion.chars().count() as u16
     }
@@ -2322,6 +2779,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_input_accepts_plain_text_as_json_string() {
+        let parsed = parse_input_as_json_or_string(b"kakaka\n").unwrap();
+        assert_eq!(parsed, serde_json::json!("kakaka"));
+    }
+
+    #[test]
+    fn parse_input_keeps_valid_json_behavior() {
+        let parsed = parse_input_as_json_or_string(br#"{"name":"alice"}"#).unwrap();
+        assert_eq!(parsed, serde_json::json!({"name": "alice"}));
+    }
+
+    #[test]
+    fn parse_input_rejects_non_json_whitespace_text() {
+        let err = parse_input_as_json_or_string(b"this is not json").unwrap_err();
+        assert!(err.to_string().contains("Failed to parse input as JSON"));
+    }
+
+    #[test]
     fn structural_hint_suppressed_when_dismissed_query_matches() {
         let mut app = App::new();
         app.executor = Some(Executor {
@@ -2336,6 +2811,23 @@ mod tests {
         assert!(!activated);
         assert!(!app.structural_hint_active);
         assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn structural_hint_activates_for_empty_query_with_root_array() {
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: br#"[{"name":"Alice"}]"#.to_vec(),
+            json_input: serde_json::json!([{"name": "Alice"}]),
+            source_label: "test".to_string(),
+        });
+
+        let activated = maybe_activate_structural_hint(&mut app, "");
+
+        assert!(activated);
+        assert!(app.structural_hint_active);
+        assert!(app.query_input.show_suggestions);
+        assert_eq!(app.query_input.suggestions[0].label, ".");
     }
 
     #[test]
@@ -2507,10 +2999,59 @@ mod tests {
     }
 
     #[test]
+    fn cursor_position_enters_parentheses_for_string_param_functions() {
+        assert_eq!(cursor_col_after_accept("split()"), 6);
+        assert_eq!(cursor_col_after_accept("startswith()"), 11);
+    }
+
+    #[test]
     fn field_path_function_start_detection_supports_empty_parens() {
         assert!(is_field_path_function_call_start("sort_by()"));
         assert!(is_field_path_function_call_start(".orders | del()"));
         assert!(!is_field_path_function_call_start("map(.)"));
+    }
+
+    #[test]
+    fn context_aware_function_start_detection_includes_string_param_functions() {
+        assert!(starts_context_aware_function_call("sort_by()"));
+        assert!(starts_context_aware_function_call("split()"));
+        assert!(starts_context_aware_function_call("startswith()"));
+        assert!(!starts_context_aware_function_call("map(.)"));
+    }
+
+    #[test]
+    fn suggestion_accept_drops_redundant_closing_paren_from_suffix() {
+        assert_eq!(
+            apply_suggestion_with_suffix("split(\"-\")", ")"),
+            "split(\"-\")"
+        );
+        assert_eq!(
+            apply_suggestion_with_suffix("split(\"-\")", ") | ."),
+            "split(\"-\") | ."
+        );
+    }
+
+    #[test]
+    fn apply_selected_suggestion_for_string_param_replaces_existing_arg_and_moves_to_end() {
+        let full = ".[].name|startswith(\"Alice\")";
+        let cursor = ".[].name|startswith(\"".chars().count();
+        let (new_query, col) = apply_selected_suggestion(
+            ".[].name|startswith(\"Bob\")",
+            Some("string value"),
+            full,
+            cursor,
+        );
+        assert_eq!(new_query, ".[].name|startswith(\"Bob\")");
+        assert_eq!(col as usize, ".[].name|startswith(\"Bob\")".chars().count());
+    }
+
+    #[test]
+    fn apply_selected_suggestion_keeps_function_cursor_inside_parens() {
+        let full = "startswith";
+        let cursor = full.chars().count();
+        let (new_query, col) = apply_selected_suggestion("startswith()", None, full, cursor);
+        assert_eq!(new_query, "startswith()");
+        assert_eq!(col, 11);
     }
 
     #[test]
@@ -2534,18 +3075,234 @@ mod tests {
     }
 
     #[test]
-    fn quoted_text_edit_keeps_suggestions_disabled_across_char_backspace_char() {
+    fn string_param_quoted_text_edit_keeps_suggestions_active() {
         let q1 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"a";
         let s1 = suggestion_mode_for_query_edit(KeyCode::Char('a'), q1, true);
-        assert!(!s1);
+        assert!(s1);
 
         let q2 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"";
         let s2 = suggestion_mode_for_query_edit(KeyCode::Backspace, q2, s1);
-        assert!(!s2);
+        assert!(s2);
 
         let q3 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"b";
         let s3 = suggestion_mode_for_query_edit(KeyCode::Char('b'), q3, s2);
-        assert!(!s3);
+        assert!(s3);
+    }
+
+    #[test]
+    fn compute_suggestions_in_string_param_context_prefers_runtime_candidates() {
+        let input = serde_json::json!(["a-b", "c-d"]);
+        let s = compute_suggestions("split(\"", Some(&input), &[], Some("string"));
+        assert!(s.iter().any(|i| i.label == "-"));
+        assert!(!s.iter().any(|i| i.label == "split"));
+    }
+
+    #[test]
+    fn active_string_param_prefix_query_extracts_pipe_prefix() {
+        assert_eq!(
+            active_string_param_prefix_query("ascii_upcase|endswith(\""),
+            Some("ascii_upcase".to_string())
+        );
+        assert_eq!(
+            active_string_param_prefix_query(".name | ascii_upcase | endswith(\"a"),
+            Some(".name | ascii_upcase".to_string())
+        );
+        assert_eq!(active_string_param_prefix_query("startswith(\""), None);
+    }
+
+    #[test]
+    fn split_string_param_query_prefix_splits_head_and_tail() {
+        assert_eq!(
+            split_string_param_query_prefix(".users[].name|endswith("),
+            Some((".users[].name|".to_string(), "endswith(".to_string()))
+        );
+        assert_eq!(
+            split_string_param_query_prefix("endswith(\"a"),
+            Some(("".to_string(), "endswith(\"a".to_string()))
+        );
+    }
+
+    #[test]
+    fn string_param_suggestions_use_evaluated_pipe_output_value() {
+        let input = serde_json::json!("kakaka");
+        let s = compute_suggestions(
+            "ascii_upcase|endswith(\"",
+            Some(&input),
+            &[],
+            Some("string"),
+        );
+        assert!(s.iter().any(|i| i.label == "KAKAKA"));
+    }
+
+    #[test]
+    fn string_param_suggestions_follow_type_changes_through_pipe_chain() {
+        let input = serde_json::json!({"n": 12, "s": "hello"});
+
+        let tostring = compute_suggestions(
+            ".n | tostring | startswith(\"",
+            Some(&input),
+            &[],
+            Some("string"),
+        );
+        assert!(tostring.iter().any(|i| i.label == "12"));
+
+        let non_string =
+            compute_suggestions(".s | length | startswith(\"", Some(&input), &[], None);
+        assert!(non_string.is_empty());
+    }
+
+    #[test]
+    fn endswith_suggestions_work_after_pipe_expression_prefix() {
+        let input = serde_json::json!({
+            "users": [{"name": "Alice"}, {"name": "Bob"}, {"name": "Alicia"}]
+        });
+        let suggestions =
+            compute_suggestions(".users[].name|endswith(", Some(&input), &[], Some("string"));
+
+        assert!(suggestions.iter().any(|s| s.label == "Alice"));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.insert_text.starts_with(".users[].name|endswith(\""))
+        );
+    }
+
+    #[test]
+    fn enter_commits_current_string_param_prefix_and_closes_call() {
+        let full = ".[].name|startswith(\"Ali";
+        let cursor = full.chars().count();
+        let (new_query, col) = commit_current_string_param_input(full, cursor).unwrap();
+        assert_eq!(new_query, ".[].name|startswith(\"Ali\")");
+        assert_eq!(col as usize, ".[].name|startswith(\"Ali\")".chars().count());
+    }
+
+    #[test]
+    fn enter_commit_replaces_existing_param_and_preserves_tail() {
+        let full = ".[].name|startswith(\"Ali\") | .age";
+        let cursor = ".[].name|startswith(\"Ali".chars().count();
+        let (new_query, col) = commit_current_string_param_input(full, cursor).unwrap();
+        assert_eq!(new_query, ".[].name|startswith(\"Ali\") | .age");
+        assert_eq!(col as usize, ".[].name|startswith(\"Ali\")".chars().count());
+    }
+
+    #[test]
+    fn tab_expands_string_param_to_longest_common_prefix() {
+        let full = "startswith(\"A";
+        let cursor = full.chars().count();
+        let suggestions = vec![
+            widgets::query_input::Suggestion {
+                label: "Alice".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alice\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "Alina".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alina\")".to_string(),
+            },
+        ];
+
+        let (new_query, col) =
+            expand_string_param_prefix_with_tab(full, cursor, &suggestions, 0).unwrap();
+        assert_eq!(new_query, "startswith(\"Alice");
+        assert_eq!(col as usize, "startswith(\"Alice".chars().count());
+    }
+
+    #[test]
+    fn tab_prefix_expand_noop_when_no_further_common_prefix() {
+        let full = "startswith(\"Ali";
+        let cursor = full.chars().count();
+        let suggestions = vec![
+            widgets::query_input::Suggestion {
+                label: "Alice".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alice\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "Alina".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alina\")".to_string(),
+            },
+        ];
+
+        let (new_query, _) =
+            expand_string_param_prefix_with_tab(full, cursor, &suggestions, 0).unwrap();
+        assert_eq!(new_query, "startswith(\"Alice");
+    }
+
+    #[test]
+    fn tab_can_extend_across_multiple_token_boundaries() {
+        let s = vec![widgets::query_input::Suggestion {
+            label: "Alice Smith".to_string(),
+            detail: Some("string value".to_string()),
+            insert_text: "startswith(\"Alice Smith\")".to_string(),
+        }];
+
+        let q1 = "startswith(\"A";
+        let c1 = q1.chars().count();
+        let (q2, _) = expand_string_param_prefix_with_tab(q1, c1, &s, 0).unwrap();
+        assert_eq!(q2, "startswith(\"Alice");
+
+        let c2 = q2.chars().count();
+        let (q3, _) = expand_string_param_prefix_with_tab(&q2, c2, &s, 0).unwrap();
+        assert_eq!(q3, "startswith(\"Alice Smith");
+    }
+
+    #[test]
+    fn tab_extends_suffix_from_short_to_longer_suffix_tokens() {
+        let s = vec![
+            widgets::query_input::Suggestion {
+                label: "com".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "endswith(\"com\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "corp.com".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "endswith(\"corp.com\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "@corp.com".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "endswith(\"@corp.com\")".to_string(),
+            },
+        ];
+
+        let q1 = "endswith(\"com";
+        let c1 = q1.chars().count();
+        let (q2, _) = expand_string_param_prefix_with_tab(q1, c1, &s, 0).unwrap();
+        assert_eq!(q2, "endswith(\"corp.com");
+
+        let c2 = q2.chars().count();
+        let (q3, _) = expand_string_param_prefix_with_tab(&q2, c2, &s, 0).unwrap();
+        assert_eq!(q3, "endswith(\"@corp.com");
+    }
+
+    #[test]
+    fn normalize_lsp_insert_text_removes_tabstop_for_string_functions() {
+        assert_eq!(
+            normalize_lsp_insert_text("startswith($0)", "startswith"),
+            "startswith()"
+        );
+        assert_eq!(
+            normalize_lsp_insert_text("endswith(${0})", "endswith"),
+            "endswith()"
+        );
+    }
+
+    #[test]
+    fn build_lsp_suggestions_normalizes_snippets_and_keeps_pipe_prefix() {
+        let cache = vec![completions::CompletionItem {
+            label: "startswith".to_string(),
+            detail: None,
+            insert_text: "startswith($0)".to_string(),
+        }];
+
+        let s = build_lsp_suggestions(&cache, "st", ".users[].name|");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].insert_text, ".users[].name|startswith()");
+        assert!(starts_context_aware_function_call(&s[0].insert_text));
+        assert_eq!(cursor_col_after_accept(&s[0].insert_text), 25);
     }
 
     #[test]

@@ -569,6 +569,32 @@ mod tests {
     }
 
     #[test]
+    fn tsv_on_object_fails_gracefully() {
+        let input = json!({"a": 1, "b": 2});
+        let res = Executor::execute_query(". | @tsv", &input);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot be tsv-formatted, only array"),
+            "Error was: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn tsv_on_array_of_objects_fails() {
+        let input = json!([{"a": 1}, {"b": 2}]);
+        let res = Executor::execute_query(". | @tsv", &input);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("does not support nested arrays or objects"),
+            "Error was: {}",
+            err
+        );
+    }
+
+    #[test]
     fn format_results_raw_strips_quotes() {
         let results = vec![json!("a,b,c")];
         assert_eq!(Executor::format_results(&results, true), "a,b,c");

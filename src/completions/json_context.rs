@@ -1,8 +1,31 @@
 use crate::completions::CompletionItem;
+use crate::completions::fuzzy::fuzzy_score;
 use serde_json::Value;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const FIELD_PATH_ARRAY_FNS: &[&str] = &["sort_by", "group_by", "unique_by", "min_by", "max_by"];
 const FIELD_PATH_INPUT_FNS: &[&str] = &["del", "path"];
+const STRING_PARAM_PREFIX_FNS: &[&str] = &["startswith", "ltrimstr"];
+const STRING_PARAM_SUFFIX_FNS: &[&str] = &["endswith", "rtrimstr"];
+const STRING_PARAM_INTERNAL_FNS: &[&str] = &["split"];
+const STRING_PARAM_FULLSTRING_FNS: &[&str] = &["contains", "index", "rindex", "indices"];
+const MAX_STRING_SOURCE: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringParamStrategy {
+    Prefix,
+    Suffix,
+    Internal,
+    FullString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StringParamCtx<'a> {
+    pub fn_name: &'a str,
+    pub strategy: StringParamStrategy,
+    pub context_path: &'a str,
+    pub inner_prefix: &'a str,
+}
 
 pub struct ParamFieldCtx<'a> {
     pub fn_name: &'a str,
@@ -17,12 +40,24 @@ pub fn get_completions(query: &str, input: &Value) -> Vec<CompletionItem> {
     obj_constructor_completions(query, input, &mut completions);
     array_index_completions(query, input, &mut completions);
     param_field_completions(query, input, &mut completions);
+    string_param_completions(query, input, &mut completions);
     completions
 }
 
 pub fn next_structural_hint(query_prefix: &str, input: &Value) -> Option<Vec<CompletionItem>> {
-    if query_prefix.is_empty() || query_prefix.ends_with('[') {
+    if query_prefix.ends_with('[') {
         return None;
+    }
+
+    if query_prefix.is_empty() {
+        return match input {
+            Value::Object(_) | Value::Array(_) => Some(vec![CompletionItem {
+                label: ".".to_string(),
+                detail: None,
+                insert_text: ".".to_string(),
+            }]),
+            _ => None,
+        };
     }
 
     if let Some(Value::Array(_)) = find_value_at_path(input, query_prefix) {
@@ -105,6 +140,86 @@ pub fn param_field_context(query: &str) -> Option<ParamFieldCtx<'_>> {
     })
 }
 
+fn parse_string_param_context(query: &str) -> Option<(StringParamCtx<'_>, usize)> {
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut depth: i32 = 0;
+    let mut open_paren: Option<usize> = None;
+    for (idx, ch) in query.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 {
+                    open_paren = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open_paren?;
+
+    let before_open = query[..open].trim_end();
+    if before_open.is_empty() {
+        return None;
+    }
+
+    let fn_end = before_open.len();
+    let mut fn_start = fn_end;
+    for (idx, ch) in before_open.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            fn_start = idx;
+        } else {
+            break;
+        }
+    }
+    if fn_start == fn_end {
+        return None;
+    }
+
+    let fn_name = &before_open[fn_start..fn_end];
+    let strategy = if STRING_PARAM_PREFIX_FNS.contains(&fn_name) {
+        StringParamStrategy::Prefix
+    } else if STRING_PARAM_SUFFIX_FNS.contains(&fn_name) {
+        StringParamStrategy::Suffix
+    } else if STRING_PARAM_INTERNAL_FNS.contains(&fn_name) {
+        StringParamStrategy::Internal
+    } else if STRING_PARAM_FULLSTRING_FNS.contains(&fn_name) {
+        StringParamStrategy::FullString
+    } else {
+        return None;
+    };
+
+    let raw_context_path = pipe_context_before(before_open[..fn_start].trim_end());
+    let context_path = if is_path_like(raw_context_path) {
+        raw_context_path
+    } else {
+        "."
+    };
+
+    let mut inner_prefix = query[open + 1..].trim_start();
+    if let Some(stripped) = inner_prefix.strip_prefix('"') {
+        inner_prefix = stripped;
+    }
+
+    Some((
+        StringParamCtx {
+            fn_name,
+            strategy,
+            context_path,
+            inner_prefix,
+        },
+        open,
+    ))
+}
+
+pub fn string_param_context(query: &str) -> Option<StringParamCtx<'_>> {
+    parse_string_param_context(query).map(|(ctx, _)| ctx)
+}
+
 fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
     let Some(ctx) = param_field_context(query) else {
         return;
@@ -154,6 +269,310 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
     }
 }
 
+fn collect_string_values(val: &Value) -> Vec<&str> {
+    match val {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .take(MAX_STRING_SOURCE)
+            .collect(),
+        Value::Object(map) => map
+            .values()
+            .filter_map(|v| v.as_str())
+            .take(MAX_STRING_SOURCE)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_token_delim(ch: char) -> bool {
+    matches!(
+        ch,
+        '\\' | '-' | '_' | '/' | '.' | ' ' | '\t' | ',' | '|' | '@'
+    )
+}
+
+fn split_tokens(s: &str) -> Vec<&str> {
+    s.split(is_token_delim).filter(|t| !t.is_empty()).collect()
+}
+
+fn extract_prefix_candidates(strings: &[&str]) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for s in strings {
+        if s.is_empty() {
+            continue;
+        }
+        out.insert((*s).to_string());
+        if let Some(first) = split_tokens(s).first() {
+            out.insert((*first).to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn extract_suffix_candidates(strings: &[&str]) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for s in strings {
+        if s.is_empty() {
+            continue;
+        }
+        out.insert((*s).to_string());
+
+        let tokens = split_tokens(s);
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let mut token_starts: Vec<usize> = Vec::new();
+        let mut pos = 0usize;
+        for token in &tokens {
+            if let Some(rel) = s[pos..].find(token) {
+                let start = pos + rel;
+                token_starts.push(start);
+                pos = start + token.len();
+            }
+        }
+
+        for (i, start) in token_starts.iter().enumerate() {
+            out.insert(s[*start..].to_string());
+
+            if i > 0 && i + 1 < token_starts.len() {
+                let prev_end = token_starts[i - 1] + tokens[i - 1].len();
+                if prev_end < *start {
+                    out.insert(s[prev_end..].to_string());
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn extract_internal_candidates(strings: &[&str]) -> Vec<String> {
+    let mut char_counts: HashMap<char, usize> = HashMap::new();
+    let mut run_counts: HashMap<String, usize> = HashMap::new();
+
+    for s in strings {
+        let mut seen_chars = HashSet::new();
+        for ch in s.chars() {
+            if !ch.is_ascii_alphanumeric() {
+                seen_chars.insert(ch);
+            }
+        }
+        for ch in seen_chars {
+            *char_counts.entry(ch).or_insert(0) += 1;
+        }
+
+        let mut seen_runs = HashSet::new();
+        let mut run_start: Option<usize> = None;
+        for (idx, ch) in s.char_indices() {
+            if !ch.is_ascii_alphanumeric() {
+                if run_start.is_none() {
+                    run_start = Some(idx);
+                }
+                continue;
+            }
+
+            if let Some(start) = run_start.take() {
+                let run = &s[start..idx];
+                let prev = s[..start].chars().next_back();
+                let next = Some(ch);
+                if prev.is_some_and(|c| c.is_ascii_alphanumeric())
+                    && next.is_some_and(|c| c.is_ascii_alphanumeric())
+                {
+                    seen_runs.insert(run.to_string());
+                }
+            }
+        }
+
+        if let Some(start) = run_start {
+            let prev = s[..start].chars().next_back();
+            if prev.is_some_and(|c| c.is_ascii_alphanumeric()) {
+                let run = &s[start..];
+                seen_runs.insert(run.to_string());
+            }
+        }
+
+        for run in seen_runs {
+            *run_counts.entry(run).or_insert(0) += 1;
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    for (ch, count) in char_counts {
+        if count >= 2 {
+            out.insert(ch.to_string());
+        }
+    }
+    for (run, count) in run_counts {
+        if count >= 2 {
+            out.insert(run);
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn extract_fullstring_candidates(strings: &[&str]) -> Vec<String> {
+    strings
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn string_param_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
+    let Some((ctx, open)) = parse_string_param_context(query) else {
+        return;
+    };
+
+    let strings = if ctx.context_path.contains("[]") {
+        collect_string_values_at_path(input, ctx.context_path)
+    } else {
+        find_value_at_path(input, ctx.context_path)
+            .map(collect_string_values)
+            .unwrap_or_default()
+    };
+    if strings.is_empty() {
+        return;
+    }
+
+    let all_candidates = match ctx.strategy {
+        StringParamStrategy::Prefix => extract_prefix_candidates(&strings),
+        StringParamStrategy::Suffix => extract_suffix_candidates(&strings),
+        StringParamStrategy::Internal => extract_internal_candidates(&strings),
+        StringParamStrategy::FullString => extract_fullstring_candidates(&strings),
+    };
+    if all_candidates.is_empty() {
+        return;
+    }
+
+    let is_exact_match = |candidate: &str| -> bool {
+        if ctx.inner_prefix.is_empty() {
+            return true;
+        }
+        match ctx.strategy {
+            StringParamStrategy::Suffix => candidate.ends_with(ctx.inner_prefix),
+            _ => candidate.starts_with(ctx.inner_prefix),
+        }
+    };
+
+    let mut exact: Vec<String> = all_candidates
+        .iter()
+        .filter(|candidate| is_exact_match(candidate))
+        .cloned()
+        .collect();
+    exact.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+
+    let mut fuzzy: Vec<String> = Vec::new();
+    if !ctx.inner_prefix.is_empty() {
+        let mut scored: Vec<(i32, String)> = all_candidates
+            .iter()
+            .filter(|candidate| !is_exact_match(candidate))
+            .filter_map(|candidate| {
+                fuzzy_score(ctx.inner_prefix, candidate).map(|score| (score, candidate.clone()))
+            })
+            .collect();
+        scored.sort_by(|(score_a, a), (score_b, b)| {
+            score_b
+                .cmp(score_a)
+                .then_with(|| a.len().cmp(&b.len()))
+                .then_with(|| a.cmp(b))
+        });
+        fuzzy = scored.into_iter().map(|(_, candidate)| candidate).collect();
+    }
+
+    let exact_count = exact.len();
+    let candidates: Vec<String> = exact.into_iter().chain(fuzzy).collect();
+
+    let query_up_to_open_paren = &query[..open + 1];
+    for (idx, candidate) in candidates.into_iter().take(20).enumerate() {
+        let escaped_candidate = candidate.replace('"', "\\\"");
+        let item = CompletionItem {
+            label: candidate.clone(),
+            detail: Some(if idx < exact_count {
+                "string value".to_string()
+            } else {
+                "~string value".to_string()
+            }),
+            insert_text: format!("{}\"{}\")", query_up_to_open_paren, escaped_candidate),
+        };
+        if !out
+            .iter()
+            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+        {
+            out.push(item);
+        }
+    }
+}
+
+fn collect_string_values_at_path<'a>(input: &'a Value, path: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for value in find_values_at_path(input, path) {
+        for s in collect_string_values(value) {
+            out.push(s);
+            if out.len() >= MAX_STRING_SOURCE {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn find_values_at_path<'a>(input: &'a Value, path: &str) -> Vec<&'a Value> {
+    if path.is_empty() || path == "." {
+        return vec![input];
+    }
+
+    let mut current: Vec<&Value> = vec![input];
+    for part in path.split('.').filter(|s| !s.is_empty()) {
+        let (key, is_array_access) = if let Some(bracket) = part.find('[') {
+            (&part[..bracket], true)
+        } else {
+            (part, false)
+        };
+
+        let mut next_values: Vec<&Value> = Vec::new();
+        for value in current {
+            match value {
+                Value::Object(map) => {
+                    let next = if key.is_empty() {
+                        Some(value)
+                    } else {
+                        map.get(key)
+                    };
+                    if let Some(next) = next {
+                        if is_array_access {
+                            if let Value::Array(arr) = next {
+                                next_values.extend(arr.iter());
+                            }
+                        } else {
+                            next_values.push(next);
+                        }
+                    }
+                }
+                Value::Array(arr) if is_array_access || key.is_empty() => {
+                    next_values.extend(arr.iter());
+                }
+                _ => {}
+            }
+        }
+        if next_values.is_empty() {
+            return Vec::new();
+        }
+        current = next_values;
+    }
+    current
+}
+
+fn is_path_like(path: &str) -> bool {
+    path == "."
+        || (path.starts_with('.')
+            && path
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '[' | ']')))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Dot-path completions  (.foo.bar, .filesets[].)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -168,20 +587,31 @@ fn dot_path_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem
         return;
     };
 
-    if let Some(Value::Object(map)) = find_value_at_path(input, path_str) {
-        for key in map.keys() {
-            if key.starts_with(prefix) {
-                let insert_text = if path_str.is_empty() {
-                    format!(".{}", key)
-                } else {
-                    format!("{}.{}", path_str, key)
-                };
-                out.push(CompletionItem {
-                    label: key.clone(),
-                    detail: Some("field".to_string()),
-                    insert_text,
-                });
+    if let Some(value) = find_value_at_path(input, path_str) {
+        if let Value::Object(map) = value {
+            for key in map.keys() {
+                if key.starts_with(prefix) {
+                    let insert_text = if path_str.is_empty() {
+                        format!(".{}", key)
+                    } else {
+                        format!("{}.{}", path_str, key)
+                    };
+                    out.push(CompletionItem {
+                        label: key.clone(),
+                        detail: Some("field".to_string()),
+                        insert_text,
+                    });
+                }
             }
+        } else if path_str.is_empty()
+            && matches!(value, Value::Array(_))
+            && "[]".starts_with(prefix)
+        {
+            out.push(CompletionItem {
+                label: "[]".to_string(),
+                detail: Some("iterate array".to_string()),
+                insert_text: ".[]".to_string(),
+            });
         }
     }
 }
@@ -410,6 +840,17 @@ mod tests {
     }
 
     #[test]
+    fn test_root_array_dot_completion_offers_iterate() {
+        let input = json!([{"name": "Alice"}, {"name": "Bob"}]);
+        let c = get_completions(".", &input);
+        assert!(
+            c.iter().any(|c| c.label == "[]" && c.insert_text == ".[]"),
+            "expected .[] completion at root array, got: {:?}",
+            c
+        );
+    }
+
+    #[test]
     fn test_nested_completions() {
         let input = json!({"a": {"b": 1, "c": 2}});
         let c = get_completions(".a.", &input);
@@ -591,6 +1032,19 @@ mod tests {
         let hints = next_structural_hint(".items", &input).unwrap();
         assert_eq!(hints[0].label, "[]");
         assert_eq!(hints[0].insert_text, ".items[]");
+    }
+
+    #[test]
+    fn structural_hint_empty_query_object_or_array_returns_dot() {
+        let object_input = json!({"name": "alice"});
+        let object_hints = next_structural_hint("", &object_input).unwrap();
+        assert_eq!(object_hints[0].label, ".");
+        assert_eq!(object_hints[0].insert_text, ".");
+
+        let array_input = json!([{"name": "alice"}]);
+        let array_hints = next_structural_hint("", &array_input).unwrap();
+        assert_eq!(array_hints[0].label, ".");
+        assert_eq!(array_hints[0].insert_text, ".");
     }
 
     #[test]
@@ -842,5 +1296,321 @@ mod tests {
             .filter(|i| i.label == "x" && i.insert_text == ".a | del(.x")
             .count();
         assert_eq!(cnt, 1);
+    }
+
+    fn has_label(v: &[CompletionItem], label: &str) -> bool {
+        v.iter().any(|c| c.label == label)
+    }
+
+    fn has_insert_text(v: &[CompletionItem], insert_text: &str) -> bool {
+        v.iter().any(|c| c.insert_text == insert_text)
+    }
+
+    #[test]
+    fn string_param_context_enters_expected_variants() {
+        let split = string_param_context("split(").unwrap();
+        assert_eq!(split.fn_name, "split");
+        assert_eq!(split.strategy, StringParamStrategy::Internal);
+        assert_eq!(split.context_path, ".");
+        assert_eq!(split.inner_prefix, "");
+
+        assert_eq!(string_param_context("split(\"").unwrap().inner_prefix, "");
+        assert_eq!(string_param_context("split(\"-").unwrap().inner_prefix, "-");
+
+        let starts = string_param_context("startswith(\"shi").unwrap();
+        assert_eq!(starts.strategy, StringParamStrategy::Prefix);
+        assert_eq!(starts.inner_prefix, "shi");
+
+        let ends = string_param_context("endswith(\".com").unwrap();
+        assert_eq!(ends.strategy, StringParamStrategy::Suffix);
+        assert_eq!(ends.inner_prefix, ".com");
+
+        assert_eq!(
+            string_param_context("ltrimstr(").unwrap().strategy,
+            StringParamStrategy::Prefix
+        );
+        assert_eq!(
+            string_param_context("rtrimstr(").unwrap().strategy,
+            StringParamStrategy::Suffix
+        );
+        assert_eq!(
+            string_param_context("contains(").unwrap().strategy,
+            StringParamStrategy::FullString
+        );
+        assert_eq!(
+            string_param_context("index(").unwrap().strategy,
+            StringParamStrategy::FullString
+        );
+        assert_eq!(
+            string_param_context("rindex(").unwrap().strategy,
+            StringParamStrategy::FullString
+        );
+        assert_eq!(
+            string_param_context("indices(").unwrap().strategy,
+            StringParamStrategy::FullString
+        );
+    }
+
+    #[test]
+    fn string_param_context_pipe_and_nested_function_cases() {
+        let pipe = string_param_context(".orders[].order_status | split(\"_").unwrap();
+        assert_eq!(pipe.context_path, ".orders[].order_status");
+        assert_eq!(pipe.inner_prefix, "_");
+
+        let nested = string_param_context("map(split(\"").unwrap();
+        assert_eq!(nested.fn_name, "split");
+        assert_eq!(nested.context_path, ".");
+
+        let piped_fn = string_param_context("ascii_upcase|endswith(\"").unwrap();
+        assert_eq!(piped_fn.fn_name, "endswith");
+        assert_eq!(piped_fn.context_path, ".");
+    }
+
+    #[test]
+    fn string_param_context_exits_and_excludes_functions() {
+        assert!(string_param_context("split(\"-\")").is_none());
+        assert!(string_param_context("split(\"-\") | .").is_none());
+        assert!(string_param_context("split(\"-\").foo").is_none());
+
+        assert!(string_param_context("test(\"").is_none());
+        assert!(string_param_context("match(\"").is_none());
+        assert!(string_param_context("scan(\"").is_none());
+        assert!(string_param_context("sub(\"").is_none());
+        assert!(string_param_context("gsub(\"").is_none());
+        assert!(string_param_context("capture(\"").is_none());
+        assert!(string_param_context("strptime(\"").is_none());
+        assert!(string_param_context("strftime(\"").is_none());
+
+        assert!(string_param_context("").is_none());
+        assert!(string_param_context(".").is_none());
+        assert!(string_param_context("sort_by(.").is_none());
+    }
+
+    #[test]
+    fn collect_string_values_handles_scalar_array_object_and_caps() {
+        assert_eq!(collect_string_values(&json!("x")), vec!["x"]);
+        assert_eq!(
+            collect_string_values(&json!(["x", 1, null, "y"])),
+            vec!["x", "y"]
+        );
+
+        let obj = json!({"a":"foo", "b":1, "c":"bar"});
+        let mut got = collect_string_values(&obj);
+        got.sort();
+        assert_eq!(got, vec!["bar", "foo"]);
+
+        assert!(collect_string_values(&json!(42)).is_empty());
+        assert!(collect_string_values(&json!(null)).is_empty());
+
+        let many = json!((0..1000).map(|i| format!("s{}", i)).collect::<Vec<_>>());
+        assert_eq!(collect_string_values(&many).len(), 500);
+    }
+
+    #[test]
+    fn extract_prefix_candidates_behaviour() {
+        let c = extract_prefix_candidates(&["CUST-42", "CUST-17"]);
+        assert!(c.contains(&"CUST".to_string()));
+        assert!(!c.contains(&"CUST-".to_string()));
+
+        let c = extract_prefix_candidates(&["shipped", "processing", "delivered"]);
+        assert!(c.contains(&"shipped".to_string()));
+        assert!(c.contains(&"processing".to_string()));
+        assert!(c.contains(&"delivered".to_string()));
+
+        assert!(extract_prefix_candidates(&[]).is_empty());
+
+        let c = extract_prefix_candidates(&["aa-bb", "aa-cc", "aa-bb"]);
+        let mut sorted = c.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(c, sorted);
+    }
+
+    #[test]
+    fn extract_suffix_candidates_behaviour() {
+        let c = extract_suffix_candidates(&["alice@example.com", "mikko@example.com"]);
+        assert!(c.contains(&"com".to_string()));
+        assert!(!c.contains(&".com".to_string()));
+        assert!(c.contains(&"example.com".to_string()));
+        assert!(c.contains(&"@example.com".to_string()));
+
+        let c = extract_suffix_candidates(&["shipped", "delivered"]);
+        assert!(c.contains(&"shipped".to_string()));
+        assert!(c.contains(&"delivered".to_string()));
+
+        assert!(extract_suffix_candidates(&[]).is_empty());
+
+        let c = extract_suffix_candidates(&["x-a", "y-a", "x-a"]);
+        let mut sorted = c.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(c, sorted);
+    }
+
+    #[test]
+    fn extract_internal_candidates_behaviour() {
+        let c = extract_internal_candidates(&["CUST-42", "ORD-001", "STORE-001"]);
+        assert!(c.contains(&"-".to_string()));
+
+        let c = extract_internal_candidates(&["foo.bar", "alpha", "beta"]);
+        assert!(!c.contains(&".".to_string()));
+
+        let c = extract_internal_candidates(&["foo__bar", "x__y", "plain"]);
+        assert!(c.contains(&"__".to_string()));
+
+        assert!(extract_internal_candidates(&[]).is_empty());
+        assert!(extract_internal_candidates(&["alpha", "beta"]).is_empty());
+    }
+
+    #[test]
+    fn extract_fullstring_candidates_behaviour() {
+        assert_eq!(
+            extract_fullstring_candidates(&["shipped", "processing", "shipped"]),
+            vec!["processing".to_string(), "shipped".to_string()]
+        );
+        assert!(extract_fullstring_candidates(&[]).is_empty());
+    }
+
+    #[test]
+    fn string_param_completion_resolves_for_entering_context() {
+        let c = get_completions("split(", &json!(["a-b", "c-d"]));
+        assert!(has_label(&c, "-"), "got: {:?}", c);
+        assert!(has_insert_text(&c, "split(\"-\")"));
+
+        let c = get_completions("split(\"-", &json!(["a-b", "c-d"]));
+        assert!(has_label(&c, "-"));
+
+        let c = get_completions("startswith(", &json!(["shipped", "processing"]));
+        assert!(has_label(&c, "shipped"));
+        assert!(has_label(&c, "processing"));
+        assert!(has_insert_text(&c, "startswith(\"shipped\")"));
+
+        let c = get_completions("startswith(\"sh", &json!(["shipped", "processing"]));
+        assert!(has_label(&c, "shipped"));
+        assert!(!has_label(&c, "processing"));
+
+        let c = get_completions("endswith(", &json!(["alice@example.com"]));
+        assert!(has_label(&c, "com"));
+        assert!(has_label(&c, "example.com"));
+        assert!(has_label(&c, "@example.com"));
+
+        let c = get_completions("ltrimstr(", &json!(["CUST-42", "CUST-17"]));
+        assert!(has_label(&c, "CUST"));
+        assert!(!has_label(&c, "CUST-"));
+
+        let c = get_completions("rtrimstr(", &json!(["alice@example.com"]));
+        assert!(has_label(&c, "com"));
+
+        let c = get_completions("contains(", &json!(["shipped", "processing"]));
+        assert!(has_label(&c, "shipped"));
+        assert!(has_label(&c, "processing"));
+
+        let c = get_completions("index(", &json!(["shipped"]));
+        assert!(has_label(&c, "shipped"));
+
+        let c = get_completions(
+            ".orders[].order_status | split(",
+            &json!({"orders": [{"order_status": "ship-fast"}, {"order_status": "plan-ahead"}]}),
+        );
+        assert!(has_label(&c, "-"));
+
+        let c = get_completions("ascii_upcase|endswith(\"", &json!("kakaka"));
+        assert!(has_label(&c, "kakaka"));
+    }
+
+    #[test]
+    fn string_tokenization_breaks_on_requested_special_characters() {
+        let values = [
+            "Alice Smith",
+            "Alice\tJones",
+            "Alice,Brown",
+            "Alice.Green",
+            "Alice|White",
+            "Alice-Black",
+        ];
+
+        let starts = extract_prefix_candidates(&values);
+        let alice_count = starts.iter().filter(|i| *i == "Alice").count();
+        assert_eq!(
+            alice_count, 1,
+            "duplicate token suggestions are not allowed"
+        );
+
+        let ends = extract_suffix_candidates(&values);
+        assert!(ends.contains(&"Smith".to_string()));
+        assert!(ends.contains(&"Jones".to_string()));
+        assert!(ends.contains(&"Brown".to_string()));
+        assert!(ends.contains(&"Green".to_string()));
+        assert!(ends.contains(&"White".to_string()));
+        assert!(ends.contains(&"Black".to_string()));
+    }
+
+    #[test]
+    fn string_param_completion_not_offered_when_outside_or_excluded() {
+        let c = get_completions("split(\"-\")", &json!(["a-b"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("split(\"")));
+
+        let c = get_completions("split(\"-\") | .", &json!(["a-b"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("split(\"")));
+
+        let c = get_completions("test(", &json!(["foo"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("test(\"")));
+
+        let c = get_completions("match(", &json!(["foo"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("match(\"")));
+
+        let c = get_completions("gsub(", &json!(["foo"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("gsub(\"")));
+
+        let c = get_completions("strptime(", &json!(["2024-01-01"]));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("strptime(\"")));
+    }
+
+    #[test]
+    fn suffix_filtering_and_shortest_first_ordering() {
+        let c = get_completions(
+            "endswith(\"com",
+            &json!(["alice@corp.com", "mikko@example.com"]),
+        );
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels.first().copied(), Some("com"));
+        assert!(labels.contains(&"corp.com"));
+        assert!(labels.contains(&"@corp.com"));
+    }
+
+    #[test]
+    fn exact_candidates_precede_fuzzy_candidates() {
+        let c = get_completions("startswith(\"alp", &json!(["alpha", "alpine", "beta"]));
+        let first_fuzzy = c
+            .iter()
+            .position(|i| i.detail.as_deref().is_some_and(|d| d.starts_with('~')))
+            .unwrap_or(c.len());
+        let last_exact = c
+            .iter()
+            .rposition(|i| !i.detail.as_deref().is_some_and(|d| d.starts_with('~')))
+            .unwrap_or(0);
+        assert!(last_exact <= first_fuzzy);
+    }
+
+    #[test]
+    fn string_param_completion_edge_cases() {
+        assert!(get_completions("split(", &json!([])).is_empty());
+        assert!(get_completions("split(", &json!([1, 2, 3])).is_empty());
+        assert!(get_completions("split(", &json!(42)).is_empty());
+        assert!(get_completions("split(", &json!(null)).is_empty());
+        assert!(get_completions(".missing | split(", &json!({"other": ["x"]})).is_empty());
+
+        let c = get_completions("contains(", &json!(["say \"hi\""]));
+        assert!(
+            c.iter()
+                .any(|i| i.insert_text == "contains(\"say \\\"hi\\\"\")")
+        );
+
+        let c = get_completions("contains(", &json!(["abc", "abc"]));
+        let count = c.iter().filter(|i| i.label == "abc").count();
+        assert_eq!(count, 1);
+
+        let c = get_completions("startswith(\"shiped", &json!(["shipped"]));
+        assert!(has_label(&c, "shipped"));
     }
 }
