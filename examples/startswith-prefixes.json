@@ -1,0 +1,42 @@
+{
+  "_comment": "Test startswith() and ltrimstr() prefix suggestions. Try: .customer_ids[] | startswith( → should suggest 'CUST' and 'CUST-'  |  .skus[] | startswith( → should suggest 'WIDGET' and 'GADGET'  |  .order_ids[] | ltrimstr( → should suggest 'ORD-'",
+  "customer_ids": [
+    "CUST-001",
+    "CUST-002",
+    "CUST-017",
+    "CUST-042",
+    "CUST-099"
+  ],
+  "skus": [
+    "WIDGET-A",
+    "WIDGET-B",
+    "WIDGET-C",
+    "GADGET-A",
+    "GADGET-B",
+    "GADGET-PRO"
+  ],
+  "order_ids": [
+    "ORD-001",
+    "ORD-002",
+    "ORD-003",
+    "ORD-099"
+  ],
+  "event_types": [
+    "user.login",
+    "user.logout",
+    "user.signup",
+    "order.created",
+    "order.shipped",
+    "order.delivered",
+    "payment.success",
+    "payment.failed"
+  ],
+  "statuses": [
+    "shipped",
+    "shipping_pending",
+    "processing",
+    "delivered",
+    "delivery_failed",
+    "cancelled"
+  ]
+}

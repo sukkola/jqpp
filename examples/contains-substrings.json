@@ -1,0 +1,33 @@
+{
+  "_comment": "Test contains(), index(), rindex(), indices() — full string value suggestions. Try: .messages[] | contains( → should suggest each message  |  .error_codes[] | index( → should suggest each code  |  .descriptions[] | indices( → should suggest full strings to search within",
+  "messages": [
+    "Order has been shipped",
+    "Payment failed: card declined",
+    "Payment failed: insufficient funds",
+    "Order delivered successfully",
+    "Customer account suspended",
+    "Retry limit exceeded"
+  ],
+  "error_codes": [
+    "ERR_AUTH_EXPIRED",
+    "ERR_AUTH_INVALID",
+    "ERR_RATE_LIMITED",
+    "ERR_NOT_FOUND",
+    "ERR_SERVER_ERROR",
+    "ERR_VALIDATION"
+  ],
+  "descriptions": [
+    "A premium widget with extended warranty",
+    "Basic widget for everyday use",
+    "Smart gadget with bluetooth connectivity",
+    "Pro gadget with extended warranty and support",
+    "Mini widget ideal for travel"
+  ],
+  "log_lines": [
+    "[2024-01-15 10:00:01] INFO  Request received",
+    "[2024-01-15 10:00:02] INFO  Processing order ORD-001",
+    "[2024-01-15 10:00:03] WARN  Retry attempt 1 for payment",
+    "[2024-01-15 10:00:04] ERROR Payment gateway timeout",
+    "[2024-01-15 10:00:05] INFO  Order ORD-001 completed"
+  ]
+}

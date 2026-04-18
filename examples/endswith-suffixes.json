@@ -1,0 +1,36 @@
+{
+  "_comment": "Test endswith() and rtrimstr() suffix suggestions. Try: .emails[] | endswith( → should suggest '.com', '@example.com', 'example.com'  |  .files[] | endswith( → should suggest '.json', '.csv', '.log'  |  .urls[] | rtrimstr( → should suggest '/health', '/metrics'",
+  "emails": [
+    "alice@example.com",
+    "mikko@example.com",
+    "sara@example.com",
+    "admin@company.fi",
+    "support@company.fi",
+    "noreply@company.fi"
+  ],
+  "files": [
+    "config.json",
+    "schema.json",
+    "output.json",
+    "export.csv",
+    "report.csv",
+    "app.log",
+    "error.log",
+    "access.log"
+  ],
+  "urls": [
+    "https://api.example.com/v1/orders",
+    "https://api.example.com/v1/products",
+    "https://api.example.com/v1/customers",
+    "https://api.example.com/v2/orders",
+    "https://api.example.com/v2/products"
+  ],
+  "mime_types": [
+    "application/json",
+    "application/xml",
+    "text/plain",
+    "text/html",
+    "image/png",
+    "image/jpeg"
+  ]
+}

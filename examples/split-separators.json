@@ -1,0 +1,33 @@
+{
+  "_comment": "Test split() separator suggestions. Try: .ids[] | split( → should suggest '-'  |  .paths[] | split( → should suggest '/'  |  .tags[] | split( → should suggest ':'",
+  "ids": [
+    "CUST-42",
+    "CUST-17",
+    "CUST-09",
+    "ORD-001",
+    "ORD-002",
+    "ORD-003",
+    "STORE-001",
+    "STORE-002"
+  ],
+  "paths": [
+    "eu/north/helsinki",
+    "eu/north/stockholm",
+    "eu/south/madrid",
+    "us/east/new-york",
+    "us/west/seattle"
+  ],
+  "tags": [
+    "env:production",
+    "env:staging",
+    "region:eu-north",
+    "region:us-east",
+    "team:backend",
+    "team:frontend"
+  ],
+  "mixed_delimiters": [
+    "2024-01-15T10:00:00Z",
+    "2024-01-16T14:30:00Z",
+    "2024-01-17T09:15:00Z"
+  ]
+}
