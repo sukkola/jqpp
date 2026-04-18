@@ -160,3 +160,17 @@
 - [x] 16.6 Implement Tab extension semantics for suffix contexts so repeated Tab extends from short suffix to longer suffix chains
 - [x] 16.7 Keep Enter commit semantics for partial typed values and validate cursor placement after commit
 - [x] 16.8 Add thorough tests for tokenization boundaries, suffix layering, ordering, fuzzy-after-exact, and repeated Tab extension behavior
+
+## 17. Format Operator Restrictions (@tsv, @csv)
+
+- [x] 17.1 Add `InputType::ArrayOfScalars` and update `compatible_with` in `src/completions/jq_builtins.rs`
+- [x] 17.2 Update `@csv`, `@tsv`, and `implode` built-ins to use `InputType::ArrayOfScalars`
+- [x] 17.3 Update `jq_type_of` to return `"array_scalars"` for arrays containing only scalars
+- [x] 17.4 Add unit tests verifying `@tsv` is excluded for arrays of objects and included for arrays of scalars
+
+## 18. Pipe Prefix Evaluation for Suggestions
+
+- [x] 18.1 Add `split_at_last_pipe` helper in `src/main.rs`
+- [x] 18.2 Update `compute_suggestions` to evaluate the query prefix before the last pipe
+- [x] 18.3 Use the evaluated value as context for JSON and fuzzy field completions
+- [x] 18.4 Add regression tests for complex pipe chains and nested field access

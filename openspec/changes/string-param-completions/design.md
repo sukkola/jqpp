@@ -23,6 +23,20 @@ The runtime string values reachable at a path are always a flat, dynamic set. Pe
 
 Regex / format-string functions (`test`, `match`, `scan`, `sub`, `gsub`, `capture`, `strptime`, `strftime`) are excluded — their parameters are not drawn from the string values.
 
+### Format Operator Restrictions (@tsv, @csv)
+
+The `@tsv` and `@csv` format operators only support arrays of scalars (strings, numbers, booleans, or nulls). To prevent misleading suggestions and runtime errors:
+- A new `InputType::ArrayOfScalars` is used for these built-ins.
+- `jq_type_of` distinguishes between generic arrays (`"array"`) and arrays of scalars (`"array_scalars"`).
+- Suggestions for these operators are only offered when the input type matches `"array_scalars"`.
+
+### Pipe Prefix Evaluation for Suggestions
+
+To provide accurate suggestions in complex pipe chains (e.g., `.users | sort_by(...)[] | {field}`):
+- `compute_suggestions` evaluates the query expression preceding the last pipe.
+- The resulting value is used as the context for JSON field and structure completions.
+- This ensures that field suggestions remain accurate even after structural transformations.
+
 ### Prefix strategy
 
 For a set of strings, extract prefixes by tokenising on common delimiter chars (`-`, `_`, `/`, `.`, `@`, ` `, `\t`, `,`, `|`) and collecting the leading token. Also include the full string itself. Deduplicate and order exact matches shortest-first.

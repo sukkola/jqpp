@@ -209,3 +209,22 @@ Tab SHALL extend the currently typed argument toward the next meaningful boundar
 #### Scenario: Enter commits partial value
 - **WHEN** typing `startswith("Ali` and pressing Enter
 - **THEN** query becomes `startswith("Ali")` and cursor moves to the end of the committed call
+
+### Requirement: Format Operator Restrictions (@tsv, @csv)
+The system SHALL only suggest `@tsv` and `@csv` format operators when the input type matches `"array_scalars"`.
+
+#### Scenario: @tsv excluded for array of objects
+- **WHEN** `get_completions("", Some("array"))` is called (where `"array"` indicates objects/nested content)
+- **THEN** `@tsv` is NOT returned in the suggestions
+
+#### Scenario: @tsv suggested for array of scalars
+- **WHEN** `get_completions("", Some("array_scalars"))` is called
+- **THEN** `@tsv` is returned in the suggestions
+
+### Requirement: Pipe Prefix Evaluation for Suggestions
+The system SHALL evaluate the query prefix preceding a pipe to determine the correct JSON context for suggestions.
+
+#### Scenario: Suggestions in object constructor after complex pipe
+- **WHEN** the query is `.users | sort_by([.role, .email])[] | {`
+- **THEN** the expression `.users | sort_by([.role, .email])[]` is evaluated
+- **AND** fields like `"role"` and `"email"` are suggested within the brace context

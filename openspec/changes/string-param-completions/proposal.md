@@ -13,6 +13,8 @@ Functions like `split`, `startswith`, `endswith`, `ltrimstr`, `rtrimstr`, `conta
 - A new `string_param_completions` helper collects runtime string values from the JSON context, runs the appropriate extraction strategy, and returns sorted `CompletionItem`s whose `insert_text` wraps the value in quotes: `split(",")`, `startswith("ship")`, etc.
 - The data structure for candidate retrieval is a **sorted `Vec<String>`** with binary-search for prefix filtering and a linear scan with subsequence scoring for fuzzy matching — no radix tree, consistent with the existing fuzzy pipeline
 - Functions with regex or multi-part arguments (`test`, `match`, `scan`, `sub`, `gsub`, `capture`, `strptime`, `strftime`) are **explicitly excluded**; they take patterns, not literal values
+- `@tsv` and `@csv` format operators are restricted to **arrays of scalars** to prevent runtime errors
+- JSON context suggestions now **evaluate the query prefix before pipes**, ensuring accurate field names even after complex transformations
 
 ## Capabilities
 
