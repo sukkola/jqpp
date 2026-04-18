@@ -36,6 +36,7 @@ pub struct LoopState {
     pub compute_handle: Option<JoinHandle<ComputeResult>>,
     pub pending_qp: String,
     pub debounce_duration: Duration,
+    pub string_param_expansion_stack: Vec<(String, usize)>,
 }
 
 impl LoopState {
@@ -54,6 +55,7 @@ impl LoopState {
             compute_handle: None,
             pending_qp: String::new(),
             debounce_duration: Duration::from_millis(50),
+            string_param_expansion_stack: Vec::new(),
         }
     }
 

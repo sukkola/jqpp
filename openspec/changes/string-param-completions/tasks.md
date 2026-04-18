@@ -174,3 +174,11 @@
 - [x] 18.2 Update `compute_suggestions` to evaluate the query prefix before the last pipe
 - [x] 18.3 Use the evaluated value as context for JSON and fuzzy field completions
 - [x] 18.4 Add regression tests for complex pipe chains and nested field access
+
+## 19. Esc to rollback Tab expansion
+
+- [x] 19.1 Add `string_param_expansion_stack` to `LoopState` in `src/loop_state.rs`
+- [x] 19.2 Update `handle_query_input_key` in `src/handlers.rs` to push to stack on Tab expansion
+- [x] 19.3 Update `handle_query_input_key` to pop and restore state on Esc
+- [x] 19.4 Ensure the stack is cleared when text is modified by other keys or cursor moves
+- [x] 19.5 Update design and spec artifacts

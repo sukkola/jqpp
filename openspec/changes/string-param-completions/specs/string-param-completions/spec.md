@@ -210,6 +210,13 @@ Tab SHALL extend the currently typed argument toward the next meaningful boundar
 - **WHEN** typing `startswith("Ali` and pressing Enter
 - **THEN** query becomes `startswith("Ali")` and cursor moves to the end of the committed call
 
+#### Scenario: Esc rolls back Tab expansion
+- **GIVEN** the query was `startswith("A"`
+- **WHEN** pressing Tab expands it to `startswith("Alice"`
+- **AND** then pressing Esc
+- **THEN** the query rolls back to `startswith("A"`
+- **AND** suggestions remain active
+
 ### Requirement: Format Operator Restrictions (@tsv, @csv)
 The system SHALL only suggest `@tsv` and `@csv` format operators when the input type matches `"array_scalars"`.
 

@@ -137,6 +137,14 @@ Candidates are built fresh for each invocation (cheap: string extraction is O(n 
   - Prefix-like functions: extend forward to next token boundary.
   - Suffix-like functions: extend to the next longer suffix that still ends with current input.
 - `Enter` commits the currently typed value as a valid call by closing and quoting the argument.
+- `Esc` rolls back the most recent Tab expansion if one exists, otherwise it dismisses suggestions/hints.
+
+### D9: Expansion history for string-param contexts
+
+To support `Esc` rollback, `LoopState` maintains a `string_param_expansion_stack: Vec<(String, usize)>`.
+- Pushed: Whenever a `Tab` expansion successfully modifies the query.
+- Popped: When `Esc` is pressed.
+- Cleared: When any other text-modifying key (Submit, Backspace, Char, etc.) or cursor movement key is pressed.
 
 This matches the established pattern in the codebase and is the optimal choice for typical jq input sizes.
 

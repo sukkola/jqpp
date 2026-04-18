@@ -26,6 +26,7 @@ pub fn handle_query_input_key(
     let is_action = |a: keymap::Action| keymap.is_action(a, &key);
 
     if is_action(keymap::Action::Submit) {
+        state.string_param_expansion_stack.clear();
         if app.query_input.show_suggestions && !app.query_input.suggestions.is_empty() {
             let cur = app.query_input.textarea.cursor().1;
             let full = app.query_input.textarea.lines()[0].clone();
@@ -157,6 +158,7 @@ pub fn handle_query_input_key(
                 &app.query_input.suggestions,
                 app.query_input.suggestion_index,
             ) {
+                state.string_param_expansion_stack.push((full, cur));
                 app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
                 app.query_input.textarea.set_block(
                     ratatui::widgets::Block::default()
@@ -271,6 +273,26 @@ pub fn handle_query_input_key(
             }
         }
     } else if key.code == KeyCode::Esc {
+        if !state.string_param_expansion_stack.is_empty()
+            && let Some((prev_query, prev_col)) = state.string_param_expansion_stack.pop()
+        {
+            app.query_input.textarea = tui_textarea::TextArea::from(vec![prev_query]);
+            app.query_input.textarea.set_block(
+                ratatui::widgets::Block::default()
+                    .title(" Query ")
+                    .borders(ratatui::widgets::Borders::ALL),
+            );
+            app.query_input
+                .textarea
+                .set_cursor_line_style(ratatui::style::Style::default());
+            app.query_input
+                .textarea
+                .move_cursor(tui_textarea::CursorMove::Jump(0, prev_col as u16));
+            state.last_edit_at = Instant::now() - state.debounce_duration;
+            state.debounce_pending = true;
+            return;
+        }
+
         let query_prefix = current_query_prefix(app);
         if app.structural_hint_active {
             dismiss_structural_hint(app, &query_prefix);
@@ -323,6 +345,7 @@ pub fn handle_query_input_key(
         key.code,
         KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
     ) {
+        state.string_param_expansion_stack.clear();
         app.structural_hint_active = false;
         app.query_input.show_suggestions = false;
         app.query_input.suggestions.clear();
@@ -334,6 +357,7 @@ pub fn handle_query_input_key(
             maybe_activate_structural_hint(app, &new_prefix);
         }
     } else if !should_ignore_query_input_key(&key) && app.query_input.textarea.input(key) {
+        state.string_param_expansion_stack.clear();
         state.last_edit_at = Instant::now();
         state.debounce_pending = true;
         let query_prefix = current_query_prefix(app);
@@ -453,5 +477,68 @@ pub fn handle_pane_key(app: &mut App<'_>, _state: &mut LoopState, key: KeyEvent,
         if app.side_menu.visible {
             app.state = AppState::SideMenu;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jqpp::app::App;
+    use jqpp::keymap::Keymap;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_esc_rolls_back_tab_expansion() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap(HashMap::new());
+
+        let original_query = "startswith(\"A\"".to_string();
+        let original_col = original_query.len();
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![original_query.clone()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, original_col as u16));
+
+        let expanded_query = "startswith(\"Alice\"".to_string();
+        let expanded_col = expanded_query.len();
+        state
+            .string_param_expansion_stack
+            .push((original_query.clone(), original_col));
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![expanded_query.clone()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, expanded_col as u16));
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], original_query);
+        assert_eq!(app.query_input.textarea.cursor().1, original_col);
+        assert!(state.string_param_expansion_stack.is_empty());
+        assert!(state.debounce_pending);
+    }
+
+    #[test]
+    fn test_text_edit_clears_expansion_stack() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap(HashMap::new());
+
+        state
+            .string_param_expansion_stack
+            .push(("prev".to_string(), 0));
+
+        let char_key = KeyEvent::new(
+            KeyCode::Char('x'),
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, char_key, &keymap);
+
+        assert!(state.string_param_expansion_stack.is_empty());
     }
 }
