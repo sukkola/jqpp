@@ -24,7 +24,8 @@ use tokio::sync::mpsc;
 
 use crate::loop_state::LoopState;
 use crate::output::{
-    OutputMode, output_mode_from_args, parse_input_as_json_or_string, selected_output,
+    OutputMode, output_mode_from_args, parse_file_by_format, parse_input_as_json_or_string,
+    parse_stdin_with_yaml_fallback, selected_output,
 };
 use crate::suggestions::{handle_finished_computes, handle_lsp_message, run_debounced_compute};
 use crate::terminal::{TerminalGuard, TtyWriter, get_tty_handle, lsp_on_path, setup_panic_hook};
@@ -195,16 +196,25 @@ fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, V
             .read_to_end(&mut stdin_data)
             .context("Failed to read from stdin pipe")?;
         if !stdin_data.is_empty() {
-            let val = parse_input_as_json_or_string(&stdin_data)?;
+            let val = parse_stdin_with_yaml_fallback(&stdin_data)?;
             input_values.push(val);
             labels.push("stdin".to_string());
-            first_raw = Some(stdin_data);
+            if first_raw.is_none() {
+                if serde_json::from_slice::<serde_json::Value>(&stdin_data).is_ok() {
+                    first_raw = Some(stdin_data);
+                } else {
+                    first_raw = Some(serde_json::to_vec(input_values.last().unwrap())?);
+                }
+            }
         }
     }
 
     for f_path in files {
         let data = std::fs::read(f_path).context(format!("Failed to read file: {:?}", f_path))?;
-        let val = parse_input_as_json_or_string(&data)?;
+        let val = parse_file_by_format(&data, f_path)?;
+        let is_json_format = jaq_fmts::Format::determine(f_path)
+            .map(|f| matches!(f, jaq_fmts::Format::Json))
+            .unwrap_or(true);
         input_values.push(val);
         labels.push(
             f_path
@@ -213,7 +223,11 @@ fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, V
                 .unwrap_or_else(|| f_path.to_string_lossy().to_string()),
         );
         if first_raw.is_none() {
-            first_raw = Some(data);
+            if is_json_format {
+                first_raw = Some(data);
+            } else {
+                first_raw = Some(serde_json::to_vec(input_values.last().unwrap())?);
+            }
         }
     }
 
@@ -421,6 +435,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn cursor_positive_within_bounds_unchanged() {
@@ -464,7 +479,7 @@ mod tests {
     fn single_file_not_wrapped_in_array() {
         let temp = std::env::temp_dir().join("single_input_test.json");
         std::fs::write(&temp, b"{\"a\":1}").unwrap();
-        let (raw, labels) = load_inputs(&[temp.clone()], true).unwrap();
+        let (raw, labels) = load_inputs(std::slice::from_ref(&temp), true).unwrap();
         assert_eq!(labels, vec!["single_input_test.json"]);
         assert_eq!(String::from_utf8_lossy(&raw), "{\"a\":1}");
         let _ = std::fs::remove_file(temp);
@@ -592,5 +607,64 @@ mod tests {
             final_args.query = Some(".[]".to_string());
         }
         assert_eq!(final_args.query.as_deref(), Some(".[] | .name"));
+    }
+
+    #[test]
+    fn yaml_file_mapping_is_parsed_to_json_object() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("input.yaml");
+        std::fs::write(&file, b"name: alice\nage: 30\n").unwrap();
+
+        let (raw, labels) = load_inputs(&[file], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(labels, vec!["input.yaml"]);
+        assert_eq!(val, json!({"name": "alice", "age": 30}));
+    }
+
+    #[test]
+    fn yml_file_sequence_is_parsed_to_json_array() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("input.yml");
+        std::fs::write(&file, b"- one\n- two\n- three\n").unwrap();
+
+        let (raw, labels) = load_inputs(&[file], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(labels, vec!["input.yml"]);
+        assert_eq!(val, json!(["one", "two", "three"]));
+    }
+
+    #[test]
+    fn malformed_yaml_file_returns_err() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("broken.yaml");
+        std::fs::write(&file, b"name: [alice\n").unwrap();
+
+        let err = load_inputs(&[file], true).unwrap_err();
+        assert!(!err.to_string().is_empty(), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mixed_json_and_yaml_files_merge_into_array() {
+        let dir = tempdir().unwrap();
+        let json_file = dir.path().join("data.json");
+        let yaml_file = dir.path().join("config.yaml");
+        std::fs::write(&json_file, b"{\"a\":1}").unwrap();
+        std::fs::write(&yaml_file, b"b: 2\n").unwrap();
+
+        let (raw, _) = load_inputs(&[json_file, yaml_file], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(val, json!([{"a": 1}, {"b": 2}]));
+    }
+
+    #[test]
+    fn json_file_path_remains_unaffected() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("still-json.json");
+        std::fs::write(&file, b"{\"ok\":true}").unwrap();
+
+        let (raw, labels) = load_inputs(&[file], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(labels, vec!["still-json.json"]);
+        assert_eq!(val, json!({"ok": true}));
     }
 }

@@ -84,7 +84,7 @@ impl Executor {
                 break;
             }
             match res {
-                Ok(val) => results.push(val_to_value(val)),
+                Ok(val) => results.push(val_to_json(val)),
                 Err(e) => return Err(anyhow::anyhow!("Runtime error: {}", e)),
             }
         }
@@ -149,7 +149,7 @@ impl Executor {
     }
 }
 
-fn val_to_value(val: Val) -> Value {
+pub fn val_to_json(val: Val) -> Value {
     match val {
         Val::Null => Value::Null,
         Val::Bool(b) => Value::Bool(b),
@@ -181,7 +181,7 @@ fn val_to_value(val: Val) -> Value {
             }
         },
         Val::BStr(b) | Val::TStr(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
-        Val::Arr(a) => Value::Array(a.iter().cloned().map(val_to_value).collect()),
+        Val::Arr(a) => Value::Array(a.iter().cloned().map(val_to_json).collect()),
         Val::Obj(o) => {
             let mut map = serde_json::Map::new();
             for (k, v) in o.iter() {
@@ -189,7 +189,7 @@ fn val_to_value(val: Val) -> Value {
                     Val::BStr(b) | Val::TStr(b) => String::from_utf8_lossy(b).into_owned(),
                     _ => k.to_string(),
                 };
-                map.insert(key, val_to_value(v.clone()));
+                map.insert(key, val_to_json(v.clone()));
             }
             Value::Object(map)
         }

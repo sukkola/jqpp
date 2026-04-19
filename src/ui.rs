@@ -543,7 +543,7 @@ mod tests {
     fn large_raw_input_render_does_not_panic() {
         // Rendering a >64 KB input must not panic or OOM the frame.
         let mut raw = vec![b'"'];
-        raw.extend(std::iter::repeat(b'x').take(66 * 1024));
+        raw.extend(std::iter::repeat_n(b'x', 66 * 1024));
         raw.push(b'"');
         let json_val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let mut app = App::new();
@@ -562,7 +562,7 @@ mod tests {
         // (The rendered terminal cannot scroll to the bottom in this unit-test.)
         const MAX_BYTES: usize = 64 * 1024;
         let mut raw = vec![b'"'];
-        raw.extend(std::iter::repeat(b'x').take(66 * 1024));
+        raw.extend(std::iter::repeat_n(b'x', 66 * 1024));
         raw.push(b'"');
 
         // Mirror the same logic used in ui::draw.

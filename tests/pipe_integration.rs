@@ -154,7 +154,8 @@ fn pipe_valid_json_parses_without_error() {
     );
 }
 
-/// Invalid JSON must produce a parse error (not a crossterm crash or panic).
+/// Input that is neither valid JSON nor valid YAML must produce a parse error
+/// (not a crossterm crash or panic).
 #[test]
 fn pipe_invalid_json_parse_error() {
     let mut child = Command::new("target/debug/jqpp")
@@ -166,7 +167,7 @@ fn pipe_invalid_json_parse_error() {
         .expect("Failed to spawn jqpp");
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(b"this is not json");
+        let _ = stdin.write_all(b"name: [alice");
     }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -186,7 +187,7 @@ fn pipe_invalid_json_parse_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Failed to parse input as JSON") || stderr.contains("invalid"),
-        "Expected a parse error for invalid JSON, got:\n{stderr}"
+        "Expected a parse error for invalid JSON/YAML, got:\n{stderr}"
     );
     assert!(
         !stderr.contains("Failed to initialize input reader"),
