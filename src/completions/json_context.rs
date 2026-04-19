@@ -304,8 +304,18 @@ fn extract_prefix_candidates(strings: &[&str]) -> Vec<String> {
             continue;
         }
         out.insert((*s).to_string());
-        if let Some(first) = split_tokens(s).first() {
-            out.insert((*first).to_string());
+        // Emit a prefix at the end of each token (s[..i] just before each delimiter).
+        // e.g. "2026-04-19" → "2026", "2026-04", "2026-04-19"
+        let mut in_token = false;
+        for (i, ch) in s.char_indices() {
+            if is_token_delim(ch) {
+                if in_token {
+                    out.insert(s[..i].to_string());
+                }
+                in_token = false;
+            } else {
+                in_token = true;
+            }
         }
     }
     out.into_iter().collect()
@@ -1411,6 +1421,12 @@ mod tests {
         let c = extract_prefix_candidates(&["CUST-42", "CUST-17"]);
         assert!(c.contains(&"CUST".to_string()));
         assert!(!c.contains(&"CUST-".to_string()));
+
+        // Multi-segment strings emit an intermediate prefix per token boundary
+        let c = extract_prefix_candidates(&["2026-04-19"]);
+        assert!(c.contains(&"2026".to_string()));
+        assert!(c.contains(&"2026-04".to_string()));
+        assert!(c.contains(&"2026-04-19".to_string()));
 
         let c = extract_prefix_candidates(&["shipped", "processing", "delivered"]);
         assert!(c.contains(&"shipped".to_string()));

@@ -887,6 +887,7 @@ mod tests {
             raw_input: br#"{"items":[1,2,3]}"#.to_vec(),
             json_input: serde_json::json!({"items": [1, 2, 3]}),
             source_label: "test".to_string(),
+            source_format: None,
         });
         app.dismissed_hint_query = Some(".items".to_string());
 
@@ -904,6 +905,7 @@ mod tests {
             raw_input: br#"[{"name":"Alice"}]"#.to_vec(),
             json_input: serde_json::json!([{"name": "Alice"}]),
             source_label: "test".to_string(),
+            source_format: None,
         });
 
         let activated = crate::hints::maybe_activate_structural_hint(&mut app, "");
@@ -977,6 +979,7 @@ mod tests {
             raw_input: br#"{"items":[{"id":1}]}"#.to_vec(),
             json_input: serde_json::json!({"items": [{"id": 1}]}),
             source_label: "test".to_string(),
+            source_format: None,
         });
 
         // Hint is showing for ".items"
@@ -1065,6 +1068,7 @@ mod tests {
             raw_input: br#"{"items":[1,2,3]}"#.to_vec(),
             json_input: serde_json::json!({"items": [1, 2, 3]}),
             source_label: "test".to_string(),
+            source_format: None,
         });
         app.query_input.suggestion_index = 3;
         app.query_input.suggestion_scroll = 2;

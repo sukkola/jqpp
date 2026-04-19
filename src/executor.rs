@@ -8,6 +8,7 @@ pub struct Executor {
     pub raw_input: Vec<u8>,
     pub json_input: Value,
     pub source_label: String,
+    pub source_format: Option<jaq_fmts::Format>,
 }
 
 impl Executor {
@@ -126,11 +127,24 @@ impl Executor {
     }
 
     pub fn format_results(results: &[Value], raw: bool) -> String {
+        Self::format_results_as(results, raw, None)
+    }
+
+    pub fn format_results_as(
+        results: &[Value],
+        raw: bool,
+        fmt: Option<jaq_fmts::Format>,
+    ) -> String {
         results
             .iter()
             .map(|v| {
                 if raw && let Some(s) = v.as_str() {
                     return s.to_string();
+                }
+                if let Some(f) = fmt
+                    && let Some(s) = format_val_in_fmt(v, f)
+                {
+                    return s;
                 }
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".to_string())
             })
@@ -146,6 +160,54 @@ impl Executor {
             format!("{:.1} KB", size as f64 / 1024.0)
         };
         format!("{} | {}", self.source_label, size_str)
+    }
+}
+
+fn format_val_in_fmt(val: &Value, fmt: jaq_fmts::Format) -> Option<String> {
+    let jval: Val = serde_json::from_value(val.clone()).ok()?;
+    match fmt {
+        jaq_fmts::Format::Yaml => {
+            let pp = jaq_json::write::Pp {
+                indent: Some("  ".to_string()),
+                sep_space: true,
+                ..Default::default()
+            };
+            let mut buf = Vec::new();
+            jaq_fmts::write::yaml::write(&mut buf, &pp, 0, &jval).ok()?;
+            String::from_utf8(buf).ok()
+        }
+        jaq_fmts::Format::Toml => jaq_fmts::write::toml::Root::try_from(&jval)
+            .ok()
+            .map(|r| r.to_string()),
+        jaq_fmts::Format::Xml => {
+            let mut buf = Vec::new();
+            jaq_fmts::write::xml::Xml::try_from(&jval)
+                .ok()?
+                .write(&mut buf)
+                .ok()?;
+            String::from_utf8(buf).ok()
+        }
+        jaq_fmts::Format::Csv => {
+            let mut buf = Vec::new();
+            jaq_fmts::write::tabular::Row::try_from(&jval)
+                .ok()?
+                .write_csv(&mut buf)
+                .ok()?;
+            String::from_utf8(buf)
+                .ok()
+                .map(|s| s.trim_end_matches('\n').to_string())
+        }
+        jaq_fmts::Format::Tsv => {
+            let mut buf = Vec::new();
+            jaq_fmts::write::tabular::Row::try_from(&jval)
+                .ok()?
+                .write_tsv(&mut buf)
+                .ok()?;
+            String::from_utf8(buf)
+                .ok()
+                .map(|s| s.trim_end_matches('\n').to_string())
+        }
+        _ => None,
     }
 }
 
@@ -599,5 +661,53 @@ mod tests {
         let results = vec![json!("a,b,c")];
         assert_eq!(Executor::format_results(&results, true), "a,b,c");
         assert_eq!(Executor::format_results(&results, false), "\"a,b,c\"");
+    }
+
+    #[test]
+    fn format_results_as_yaml_renders_mapping() {
+        let results = vec![json!({"name": "alice", "age": 30})];
+        let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Yaml));
+        assert!(out.contains("name:"), "expected YAML key, got: {out}");
+        assert!(out.contains("alice"), "expected value, got: {out}");
+        // Must not be JSON
+        assert!(!out.starts_with('{'), "should not be JSON object: {out}");
+    }
+
+    #[test]
+    fn format_results_as_yaml_renders_sequence() {
+        let results = vec![json!(["one", "two", "three"])];
+        let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Yaml));
+        assert!(out.contains("one"), "got: {out}");
+        assert!(!out.starts_with('['), "should not be JSON array: {out}");
+    }
+
+    #[test]
+    fn format_results_as_none_gives_json() {
+        let results = vec![json!({"x": 1})];
+        let out = Executor::format_results_as(&results, false, None);
+        let _: serde_json::Value = serde_json::from_str(&out).expect("should be valid JSON");
+    }
+
+    #[test]
+    fn format_results_as_falls_back_to_json_for_scalar_toml() {
+        // TOML root must be a mapping; a scalar result cannot be TOML — should fall back to JSON
+        let results = vec![json!(42)];
+        let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Toml));
+        assert_eq!(out.trim(), "42");
+    }
+
+    #[test]
+    fn format_results_as_csv_row() {
+        let results = vec![json!([1, "alice", true])];
+        let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Csv));
+        assert!(out.contains("alice"), "got: {out}");
+        assert!(!out.starts_with('['), "should not be JSON: {out}");
+    }
+
+    #[test]
+    fn format_results_as_multiple_values_joined_by_newline() {
+        let results = vec![json!({"a": 1}), json!({"b": 2})];
+        let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Yaml));
+        assert_eq!(out.matches('\n').count() >= 1, true, "got: {out}");
     }
 }

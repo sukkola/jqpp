@@ -204,7 +204,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, keymap: &crate::keymap::Keymap) {
     let right_content = if let Some(ref error) = app.error {
         error.clone()
     } else {
-        crate::executor::Executor::format_results(&app.results, app.raw_output)
+        crate::executor::Executor::format_results_as(
+            &app.results,
+            app.raw_output,
+            app.executor.as_ref().and_then(|e| e.source_format),
+        )
     };
     let right_style = if matches!(app.state, AppState::RightPane) {
         Style::default()
@@ -406,6 +410,7 @@ mod tests {
             raw_input: b"{\"name\":\"alice\"}".to_vec(),
             json_input: json!({"name": "alice"}),
             source_label: "test".to_string(),
+            source_format: None,
         });
         let buf = render(&mut app, 80, 24);
         // Left pane is columns 0-39, rows 4-22 (inside border).
@@ -427,6 +432,7 @@ mod tests {
                 "tail": "BOTTOM_MARKER"
             }),
             source_label: "test".to_string(),
+            source_format: None,
         });
 
         let _ = render(&mut app, 24, 10);
@@ -521,6 +527,7 @@ mod tests {
             raw_input: b"{}".to_vec(),
             json_input: json!({"config": {"name": "hello"}}),
             source_label: "t".to_string(),
+            source_format: None,
         });
         // Pre-populate results as main_loop would after executing the query.
         app.results = Executor::execute(
@@ -551,6 +558,7 @@ mod tests {
             raw_input: raw,
             json_input: json_val,
             source_label: "big".to_string(),
+            source_format: None,
         });
         // Just verify it renders without panic.
         let _ = render(&mut app, 80, 24);
@@ -617,6 +625,7 @@ mod tests {
             raw_input: left_text.into_bytes(),
             json_input: json!({}),
             source_label: "test".to_string(),
+            source_format: None,
         });
 
         let _ = render(&mut app, 100, 28);
@@ -645,6 +654,7 @@ mod tests {
             raw_input: left_text.into_bytes(),
             json_input: json!({}),
             source_label: "test".to_string(),
+            source_format: None,
         });
 
         app.left_scroll = 0;

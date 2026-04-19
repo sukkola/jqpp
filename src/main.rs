@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 
 use crate::loop_state::LoopState;
 use crate::output::{
-    OutputMode, output_mode_from_args, parse_file_by_format, parse_input_as_json_or_string,
-    parse_stdin_with_yaml_fallback, selected_output,
+    OutputMode, output_mode_from_args, parse_file_by_format, parse_stdin_with_yaml_fallback,
+    selected_output,
 };
 use crate::suggestions::{handle_finished_computes, handle_lsp_message, run_debounced_compute};
 use crate::terminal::{TerminalGuard, TtyWriter, get_tty_handle, lsp_on_path, setup_panic_hook};
@@ -104,7 +104,8 @@ fn actual_main(mut args: Args) -> Result<()> {
 
     let stdin_is_terminal = io::stdin().is_terminal();
 
-    let (input_data, labels) = load_inputs(&args.files, stdin_is_terminal)?;
+    let (display_raw, json_opt, labels, source_format) =
+        load_inputs(&args.files, stdin_is_terminal)?;
 
     let tty_handle = get_tty_handle();
 
@@ -125,8 +126,7 @@ fn actual_main(mut args: Args) -> Result<()> {
         ));
     }
 
-    let executor = if !input_data.is_empty() {
-        let json_input = parse_input_as_json_or_string(&input_data)?;
+    let executor = if let Some(json_input) = json_opt {
         let source_label = if labels.is_empty() {
             "stdin".to_string()
         } else {
@@ -143,9 +143,10 @@ fn actual_main(mut args: Args) -> Result<()> {
         }
 
         Some(Executor {
-            raw_input: input_data,
+            raw_input: display_raw,
             json_input,
             source_label,
+            source_format,
         })
     } else {
         None
@@ -185,10 +186,14 @@ fn actual_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, Vec<String>)> {
-    let mut input_values = Vec::new();
+fn load_inputs(
+    files: &[PathBuf],
+    stdin_is_terminal: bool,
+) -> Result<(Vec<u8>, Option<serde_json::Value>, Vec<String>, Option<jaq_fmts::Format>)> {
+    let mut input_values: Vec<serde_json::Value> = Vec::new();
     let mut labels = Vec::new();
-    let mut first_raw = None;
+    let mut first_display_raw: Option<Vec<u8>> = None;
+    let mut first_source_format: Option<jaq_fmts::Format> = None;
 
     if !stdin_is_terminal {
         let mut stdin_data = Vec::new();
@@ -197,24 +202,31 @@ fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, V
             .context("Failed to read from stdin pipe")?;
         if !stdin_data.is_empty() {
             let val = parse_stdin_with_yaml_fallback(&stdin_data)?;
+            if first_display_raw.is_none() {
+                let is_json = serde_json::from_slice::<serde_json::Value>(&stdin_data).is_ok();
+                first_source_format = if !is_json && !val.is_string() {
+                    Some(jaq_fmts::Format::Yaml)
+                } else {
+                    None
+                };
+                first_display_raw = Some(stdin_data);
+            }
             input_values.push(val);
             labels.push("stdin".to_string());
-            if first_raw.is_none() {
-                if serde_json::from_slice::<serde_json::Value>(&stdin_data).is_ok() {
-                    first_raw = Some(stdin_data);
-                } else {
-                    first_raw = Some(serde_json::to_vec(input_values.last().unwrap())?);
-                }
-            }
         }
     }
 
     for f_path in files {
         let data = std::fs::read(f_path).context(format!("Failed to read file: {:?}", f_path))?;
         let val = parse_file_by_format(&data, f_path)?;
-        let is_json_format = jaq_fmts::Format::determine(f_path)
+        let fmt = jaq_fmts::Format::determine(f_path);
+        let is_json_format = fmt
             .map(|f| matches!(f, jaq_fmts::Format::Json))
             .unwrap_or(true);
+        if first_display_raw.is_none() {
+            first_source_format = if is_json_format { None } else { fmt };
+            first_display_raw = Some(data);
+        }
         input_values.push(val);
         labels.push(
             f_path
@@ -222,25 +234,19 @@ fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, V
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| f_path.to_string_lossy().to_string()),
         );
-        if first_raw.is_none() {
-            if is_json_format {
-                first_raw = Some(data);
-            } else {
-                first_raw = Some(serde_json::to_vec(input_values.last().unwrap())?);
-            }
-        }
     }
 
     if input_values.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), None, Vec::new(), None));
     }
 
     if input_values.len() == 1 {
-        Ok((first_raw.unwrap(), labels))
+        let val = input_values.remove(0);
+        Ok((first_display_raw.unwrap(), Some(val), labels, first_source_format))
     } else {
         let merged = serde_json::Value::Array(input_values);
         let raw = serde_json::to_vec(&merged)?;
-        Ok((raw, labels))
+        Ok((raw, Some(merged), labels, None))
     }
 }
 
@@ -479,7 +485,7 @@ mod tests {
     fn single_file_not_wrapped_in_array() {
         let temp = std::env::temp_dir().join("single_input_test.json");
         std::fs::write(&temp, b"{\"a\":1}").unwrap();
-        let (raw, labels) = load_inputs(std::slice::from_ref(&temp), true).unwrap();
+        let (raw, _json_opt, labels, _fmt) = load_inputs(std::slice::from_ref(&temp), true).unwrap();
         assert_eq!(labels, vec!["single_input_test.json"]);
         assert_eq!(String::from_utf8_lossy(&raw), "{\"a\":1}");
         let _ = std::fs::remove_file(temp);
@@ -491,7 +497,7 @@ mod tests {
         let t2 = std::env::temp_dir().join("two_files_2.json");
         std::fs::write(&t1, b"1").unwrap();
         std::fs::write(&t2, b"2").unwrap();
-        let (raw, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        let (raw, _, _, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(val, json!([1, 2]));
         let _ = std::fs::remove_file(t1);
@@ -504,7 +510,7 @@ mod tests {
         let t2 = std::env::temp_dir().join("non_json_2.txt");
         std::fs::write(&t1, b"1").unwrap();
         std::fs::write(&t2, b"hello").unwrap();
-        let (raw, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        let (raw, _, _, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(val, json!([1, "hello"]));
 
@@ -520,7 +526,7 @@ mod tests {
         std::fs::write(&t1, b"{\"x\":1}").unwrap();
         std::fs::write(&t2, b"[1,2]").unwrap();
         std::fs::write(&t3, b"\"foo\"").unwrap();
-        let (raw, _) = load_inputs(&[t1.clone(), t2.clone(), t3.clone()], true).unwrap();
+        let (raw, _, _, _) = load_inputs(&[t1.clone(), t2.clone(), t3.clone()], true).unwrap();
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(val, json!([{"x":1}, [1,2], "foo"]));
         let _ = std::fs::remove_file(t1);
@@ -532,7 +538,7 @@ mod tests {
     fn duplicate_file_produces_two_entries() {
         let t1 = std::env::temp_dir().join("dup_1.json");
         std::fs::write(&t1, b"1").unwrap();
-        let (raw, labels) = load_inputs(&[t1.clone(), t1.clone()], true).unwrap();
+        let (raw, _, labels, _) = load_inputs(&[t1.clone(), t1.clone()], true).unwrap();
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(val, json!([1, 1]));
         assert_eq!(labels, vec!["dup_1.json", "dup_1.json"]);
@@ -545,7 +551,7 @@ mod tests {
         let t2 = std::env::temp_dir().join("label_2.json");
         std::fs::write(&t1, b"1").unwrap();
         std::fs::write(&t2, b"2").unwrap();
-        let (_, labels) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        let (_, _, labels, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
         assert_eq!(labels, vec!["label_1.json", "label_2.json"]);
         let _ = std::fs::remove_file(t1);
         let _ = std::fs::remove_file(t2);
@@ -572,7 +578,7 @@ mod tests {
         };
 
         let stdin_is_terminal = true;
-        let (_, labels) = load_inputs(&args.files, stdin_is_terminal).unwrap();
+        let (_, _, labels, _) = load_inputs(&args.files, stdin_is_terminal).unwrap();
         let mut final_args = args;
         if labels.len() > 1 && final_args.query.is_none() {
             final_args.query = Some(".[]".to_string());
@@ -601,7 +607,7 @@ mod tests {
         };
 
         let stdin_is_terminal = true;
-        let (_, labels) = load_inputs(&args.files, stdin_is_terminal).unwrap();
+        let (_, _, labels, _) = load_inputs(&args.files, stdin_is_terminal).unwrap();
         let mut final_args = args;
         if labels.len() > 1 && final_args.query.is_none() {
             final_args.query = Some(".[]".to_string());
@@ -615,10 +621,11 @@ mod tests {
         let file = dir.path().join("input.yaml");
         std::fs::write(&file, b"name: alice\nage: 30\n").unwrap();
 
-        let (raw, labels) = load_inputs(&[file], true).unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let (raw, json_opt, labels, fmt) = load_inputs(&[file], true).unwrap();
         assert_eq!(labels, vec!["input.yaml"]);
-        assert_eq!(val, json!({"name": "alice", "age": 30}));
+        assert_eq!(raw, b"name: alice\nage: 30\n");
+        assert!(matches!(fmt, Some(jaq_fmts::Format::Yaml)));
+        assert_eq!(json_opt.unwrap(), json!({"name": "alice", "age": 30}));
     }
 
     #[test]
@@ -627,10 +634,11 @@ mod tests {
         let file = dir.path().join("input.yml");
         std::fs::write(&file, b"- one\n- two\n- three\n").unwrap();
 
-        let (raw, labels) = load_inputs(&[file], true).unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let (raw, json_opt, labels, fmt) = load_inputs(&[file], true).unwrap();
         assert_eq!(labels, vec!["input.yml"]);
-        assert_eq!(val, json!(["one", "two", "three"]));
+        assert_eq!(raw, b"- one\n- two\n- three\n");
+        assert!(matches!(fmt, Some(jaq_fmts::Format::Yaml)));
+        assert_eq!(json_opt.unwrap(), json!(["one", "two", "three"]));
     }
 
     #[test]
@@ -651,7 +659,7 @@ mod tests {
         std::fs::write(&json_file, b"{\"a\":1}").unwrap();
         std::fs::write(&yaml_file, b"b: 2\n").unwrap();
 
-        let (raw, _) = load_inputs(&[json_file, yaml_file], true).unwrap();
+        let (raw, _, _, _) = load_inputs(&[json_file, yaml_file], true).unwrap();
         let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(val, json!([{"a": 1}, {"b": 2}]));
     }
@@ -662,8 +670,8 @@ mod tests {
         let file = dir.path().join("still-json.json");
         std::fs::write(&file, b"{\"ok\":true}").unwrap();
 
-        let (raw, labels) = load_inputs(&[file], true).unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let (_raw, json_opt, labels, _fmt) = load_inputs(&[file], true).unwrap();
+        let val = json_opt.unwrap();
         assert_eq!(labels, vec!["still-json.json"]);
         assert_eq!(val, json!({"ok": true}));
     }
