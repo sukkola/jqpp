@@ -708,6 +708,6 @@ mod tests {
     fn format_results_as_multiple_values_joined_by_newline() {
         let results = vec![json!({"a": 1}), json!({"b": 2})];
         let out = Executor::format_results_as(&results, false, Some(jaq_fmts::Format::Yaml));
-        assert_eq!(out.matches('\n').count() >= 1, true, "got: {out}");
+        assert!(out.matches('\n').count() >= 1, "got: {out}");
     }
 }

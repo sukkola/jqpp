@@ -30,6 +30,13 @@ use crate::output::{
 use crate::suggestions::{handle_finished_computes, handle_lsp_message, run_debounced_compute};
 use crate::terminal::{TerminalGuard, TtyWriter, get_tty_handle, lsp_on_path, setup_panic_hook};
 
+type LoadInputsResult = (
+    Vec<u8>,
+    Option<serde_json::Value>,
+    Vec<String>,
+    Option<jaq_fmts::Format>,
+);
+
 #[derive(Parser, Debug)]
 #[command(version)]
 #[command(group(
@@ -186,10 +193,7 @@ fn actual_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-fn load_inputs(
-    files: &[PathBuf],
-    stdin_is_terminal: bool,
-) -> Result<(Vec<u8>, Option<serde_json::Value>, Vec<String>, Option<jaq_fmts::Format>)> {
+fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<LoadInputsResult> {
     let mut input_values: Vec<serde_json::Value> = Vec::new();
     let mut labels = Vec::new();
     let mut first_display_raw: Option<Vec<u8>> = None;
@@ -242,7 +246,12 @@ fn load_inputs(
 
     if input_values.len() == 1 {
         let val = input_values.remove(0);
-        Ok((first_display_raw.unwrap(), Some(val), labels, first_source_format))
+        Ok((
+            first_display_raw.unwrap(),
+            Some(val),
+            labels,
+            first_source_format,
+        ))
     } else {
         let merged = serde_json::Value::Array(input_values);
         let raw = serde_json::to_vec(&merged)?;
@@ -485,7 +494,8 @@ mod tests {
     fn single_file_not_wrapped_in_array() {
         let temp = std::env::temp_dir().join("single_input_test.json");
         std::fs::write(&temp, b"{\"a\":1}").unwrap();
-        let (raw, _json_opt, labels, _fmt) = load_inputs(std::slice::from_ref(&temp), true).unwrap();
+        let (raw, _json_opt, labels, _fmt) =
+            load_inputs(std::slice::from_ref(&temp), true).unwrap();
         assert_eq!(labels, vec!["single_input_test.json"]);
         assert_eq!(String::from_utf8_lossy(&raw), "{\"a\":1}");
         let _ = std::fs::remove_file(temp);

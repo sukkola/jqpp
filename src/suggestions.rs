@@ -673,7 +673,7 @@ pub fn should_ignore_query_input_key(key: &ratatui::crossterm::event::KeyEvent) 
 pub fn suggestion_mode_for_query_edit(
     key_code: KeyCode,
     query_prefix: &str,
-    current_active: bool,
+    _current_active: bool,
 ) -> bool {
     if is_inside_double_quoted_string(query_prefix)
         && completions::json_context::string_param_context(query_prefix).is_none()
@@ -691,7 +691,10 @@ pub fn suggestion_mode_for_query_edit(
         | KeyCode::Backspace
         | KeyCode::Delete => true,
         KeyCode::Char(c) if c.is_alphanumeric() || c == '_' || c == '-' || c == ' ' => {
-            current_active
+            // Always activate suggestions when typing alphanumeric characters so that
+            // typing `c` in an empty box immediately offers field completions like `.created`.
+            // Users should not need to press Down first to get the suggestion dropdown.
+            true
         }
         _ => false,
     }
@@ -1113,6 +1116,103 @@ mod tests {
         let q3 = ".orders[].customer.customer_id|ascii_downcase|startswith(\"b";
         let s3 = suggestion_mode_for_query_edit(KeyCode::Char('b'), q3, s2);
         assert!(s3);
+    }
+
+    // --- suggestion_mode_for_query_edit: trigger-context rules ---
+
+    #[test]
+    fn typing_alpha_on_empty_query_activates_suggestions() {
+        // User starts typing from scratch — suggestions should appear immediately
+        // so that e.g. typing `c` offers field completions like `.created`.
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('a'),
+            "a",
+            false
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('s'),
+            "as",
+            false
+        ));
+    }
+
+    #[test]
+    fn typing_alpha_activates_suggestions_regardless_of_prior_state() {
+        // Suggestions activate on alphanumeric whether or not they were already on.
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('a'),
+            "a",
+            false
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('a'),
+            "a",
+            true
+        ));
+    }
+
+    #[test]
+    fn typing_alpha_after_dot_keeps_suggestions_active() {
+        // ".f" → user is filtering a field name; suggestions stay visible.
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('f'),
+            ".f",
+            true
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('o'),
+            ".fo",
+            true
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('o'),
+            ".foo",
+            true
+        ));
+    }
+
+    #[test]
+    fn typing_alpha_after_pipe_keeps_suggestions_active() {
+        // ".x | f" → user is typing a function name after a pipe.
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('f'),
+            ".x|f",
+            true
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('o'),
+            ".x|fo",
+            true
+        ));
+    }
+
+    #[test]
+    fn typing_alpha_after_array_accessor_keeps_suggestions_active() {
+        // ".[].name" → inside an array path.
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('n'),
+            "[].n",
+            true
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('e'),
+            ".items[].name",
+            true
+        ));
+    }
+
+    #[test]
+    fn dot_and_pipe_always_activate_regardless_of_current_state() {
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('.'),
+            ".",
+            false
+        ));
+        assert!(suggestion_mode_for_query_edit(
+            KeyCode::Char('|'),
+            "a|",
+            false
+        ));
     }
 
     #[test]

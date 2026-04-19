@@ -591,8 +591,15 @@ fn dot_path_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem
     let (path_str, prefix) = if let Some(last_dot) = query.rfind('.') {
         (&query[..last_dot], &query[last_dot + 1..])
     } else if query.is_empty() {
-        // Empty query → complete top-level fields
+        // Empty query → complete top-level fields with no filter
         ("", "")
+    } else if query
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        // Bare token like "c" or "cre" → filter top-level fields by prefix so
+        // typing a letter immediately surfaces matching field names (e.g. "c" → .created)
+        ("", query)
     } else {
         return;
     };
@@ -1314,6 +1321,38 @@ mod tests {
 
     fn has_insert_text(v: &[CompletionItem], insert_text: &str) -> bool {
         v.iter().any(|c| c.insert_text == insert_text)
+    }
+
+    #[test]
+    fn bare_token_matches_top_level_fields_by_prefix() {
+        let input = json!({"created": "2026-04-19", "name": "jqpp", "count": 3});
+
+        // Single letter that is a prefix of a field name
+        let c = get_completions("c", &input);
+        assert!(has_label(&c, "created"), "expected 'created' for query 'c'");
+        assert!(has_insert_text(&c, ".created"));
+        assert!(has_label(&c, "count"), "expected 'count' for query 'c'");
+        // Fields that do NOT start with "c" must not appear
+        assert!(!has_label(&c, "name"));
+
+        // Longer prefix
+        let c2 = get_completions("cre", &input);
+        assert!(has_label(&c2, "created"));
+        assert!(!has_label(&c2, "count"));
+
+        // Non-matching prefix returns nothing for json_context
+        let c3 = get_completions("xyz", &input);
+        assert!(!has_label(&c3, "created"));
+        assert!(!has_label(&c3, "name"));
+    }
+
+    #[test]
+    fn bare_token_does_not_interfere_with_dot_paths() {
+        let input = json!({"user": {"name": "alice"}});
+        // A dot-prefixed path still works as before
+        let c = get_completions(".user.", &input);
+        assert!(has_label(&c, "name"));
+        assert!(has_insert_text(&c, ".user.name"));
     }
 
     #[test]
