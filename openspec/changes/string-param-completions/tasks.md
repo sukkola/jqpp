@@ -188,3 +188,8 @@
 - [x] 20.1 Update `expand_string_param_prefix_with_tab` in `src/accept.rs` to complete fully if an item beyond the first is selected
 - [x] 20.2 Update `expand_string_param_prefix_with_tab` to complete fully if only one candidate exists
 - [x] 20.3 Add unit tests verifying selection-respecting Tab expansion
+
+## 21. Fix redundant closing delimiters
+
+- [x] 21.1 Update `apply_suggestion_with_suffix` in `src/accept.rs` to handle overlapping `]`, `}`, and `)` delimiters
+- [x] 21.2 Add regression tests for array bracket and object brace overlap

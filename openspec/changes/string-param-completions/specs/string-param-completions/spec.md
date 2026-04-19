@@ -223,6 +223,14 @@ Tab SHALL extend the currently typed argument toward the next meaningful boundar
 - **AND** pressing Tab
 - **THEN** query becomes `startswith("apple pie"` (fully completed)
 
+### Requirement: Redundant Closing Delimiters
+The system SHALL NOT add redundant closing delimiters (`)`, `]`, `}`) when accepting a suggestion if the delimiter is already present at the start of the suffix.
+
+#### Scenario: Array index completion overlaps with suffix
+- **GIVEN** query is `.products[].name` and cursor is between `[` and `]`
+- **WHEN** accepting suggestion `[0]`
+- **THEN** query becomes `.products[0].name` (one closing bracket only)
+
 ### Requirement: Format Operator Restrictions (@tsv, @csv)
 The system SHALL only suggest `@tsv` and `@csv` format operators when the input type matches `"array_scalars"`.
 
