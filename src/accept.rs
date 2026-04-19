@@ -254,9 +254,9 @@ pub fn expand_string_param_prefix_with_tab(
                 .map(|s| s.as_str())
         })?;
 
-    let extended = if suggestion_index > 0 || candidates.len() == 1 {
+    let extended = if suggestion_index > 0 {
         // If the user has explicitly moved the selection beyond the first item,
-        // OR if there is only one candidate, complete fully to that item.
+        // complete fully to that item.
         Some(preferred.to_string())
     } else if matches!(
         ctx.strategy,
@@ -269,11 +269,15 @@ pub fn expand_string_param_prefix_with_tab(
             .cloned()
     } else {
         extend_to_next_token_boundary(ctx.inner_prefix, preferred).or_else(|| {
-            let lcp = longest_common_prefix(&candidates);
-            if lcp.chars().count() > ctx.inner_prefix.chars().count() {
-                Some(lcp)
+            if candidates.len() == 1 {
+                Some(preferred.to_string())
             } else {
-                None
+                let lcp = longest_common_prefix(&candidates);
+                if lcp.chars().count() > ctx.inner_prefix.chars().count() {
+                    Some(lcp)
+                } else {
+                    None
+                }
             }
         })
     }?;

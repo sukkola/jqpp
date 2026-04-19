@@ -37,8 +37,17 @@ use crate::terminal::{TerminalGuard, TtyWriter, get_tty_handle, lsp_on_path, set
         .multiple(false)
 ))]
 struct Args {
-    /// Positional [file]
-    file: Option<PathBuf>,
+    /// Positional [files]
+    #[arg(num_args(0..))]
+    files: Vec<PathBuf>,
+
+    /// Initial query string
+    #[arg(long)]
+    query: Option<String>,
+
+    /// Initial cursor column (0-based from start; negative counts from end)
+    #[arg(long, allow_hyphen_values = true)]
+    cursor: Option<i32>,
 
     /// Disable LSP even if jq-lsp is found on PATH
     #[arg(long)]
@@ -88,21 +97,13 @@ fn main() {
     }
 }
 
-fn actual_main(args: Args) -> Result<()> {
+fn actual_main(mut args: Args) -> Result<()> {
     setup_panic_hook(args.debug);
     let output_mode = output_mode_from_args(args.print_output, args.print_query, args.print_input);
 
-    let mut input_data = Vec::new();
-
     let stdin_is_terminal = io::stdin().is_terminal();
 
-    if let Some(ref f_path) = args.file {
-        input_data = std::fs::read(f_path).context(format!("Failed to read file: {:?}", f_path))?;
-    } else if !stdin_is_terminal {
-        io::stdin()
-            .read_to_end(&mut input_data)
-            .context("Failed to read from stdin pipe")?;
-    }
+    let (input_data, labels) = load_inputs(&args.files, stdin_is_terminal)?;
 
     let tty_handle = get_tty_handle();
 
@@ -125,14 +126,25 @@ fn actual_main(args: Args) -> Result<()> {
 
     let executor = if !input_data.is_empty() {
         let json_input = parse_input_as_json_or_string(&input_data)?;
+        let source_label = if labels.is_empty() {
+            "stdin".to_string()
+        } else {
+            let joined = labels.join(", ");
+            if joined.len() > 60 {
+                format!("{}…", &joined[..59])
+            } else {
+                joined
+            }
+        };
+
+        if labels.len() > 1 && args.query.is_none() {
+            args.query = Some(".[]".to_string());
+        }
+
         Some(Executor {
             raw_input: input_data,
             json_input,
-            source_label: args
-                .file
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| "stdin".to_string()),
+            source_label,
         })
     } else {
         None
@@ -172,6 +184,64 @@ fn actual_main(args: Args) -> Result<()> {
     Ok(())
 }
 
+fn load_inputs(files: &[PathBuf], stdin_is_terminal: bool) -> Result<(Vec<u8>, Vec<String>)> {
+    let mut input_values = Vec::new();
+    let mut labels = Vec::new();
+    let mut first_raw = None;
+
+    if !stdin_is_terminal {
+        let mut stdin_data = Vec::new();
+        io::stdin()
+            .read_to_end(&mut stdin_data)
+            .context("Failed to read from stdin pipe")?;
+        if !stdin_data.is_empty() {
+            let val = parse_input_as_json_or_string(&stdin_data)?;
+            input_values.push(val);
+            labels.push("stdin".to_string());
+            first_raw = Some(stdin_data);
+        }
+    }
+
+    for f_path in files {
+        let data = std::fs::read(f_path).context(format!("Failed to read file: {:?}", f_path))?;
+        let val = parse_input_as_json_or_string(&data)?;
+        input_values.push(val);
+        labels.push(
+            f_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| f_path.to_string_lossy().to_string()),
+        );
+        if first_raw.is_none() {
+            first_raw = Some(data);
+        }
+    }
+
+    if input_values.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    if input_values.len() == 1 {
+        Ok((first_raw.unwrap(), labels))
+    } else {
+        let merged = serde_json::Value::Array(input_values);
+        let raw = serde_json::to_vec(&merged)?;
+        Ok((raw, labels))
+    }
+}
+
+fn resolve_cursor(cursor_arg: Option<i32>, query_len: usize) -> usize {
+    if let Some(col) = cursor_arg {
+        if col >= 0 {
+            (col as usize).min(query_len)
+        } else {
+            query_len.saturating_sub((-col) as usize)
+        }
+    } else {
+        query_len
+    }
+}
+
 async fn run(
     executor: Option<Executor>,
     args: Args,
@@ -188,14 +258,26 @@ async fn run(
     app.lsp_enabled = use_lsp;
     app.executor = executor;
 
+    if let Some(q) = args.query.as_ref()
+        && !q.is_empty()
+    {
+        app.query_input.textarea.insert_str(q);
+        let query_len = q.chars().count();
+        let resolved = resolve_cursor(args.cursor, query_len);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, resolved as u16));
+    }
+
     if std::env::var("JQPP_SKIP_TTY_CHECK").is_ok() {
         if output_mode.is_some() {
-            if let Some(ref exec) = app.executor
-                && let Ok(results) = Executor::execute(".", &exec.json_input)
-            {
-                app.results = results;
-                app.error = None;
-                app.raw_output = false;
+            if let Some(ref exec) = app.executor {
+                let q = args.query.as_deref().unwrap_or(".");
+                if let Ok(results) = Executor::execute(q, &exec.json_input) {
+                    app.results = results;
+                    app.error = None;
+                    app.raw_output = false;
+                }
             }
         } else if use_lsp {
             let (lsp_tx, _lsp_rx) = mpsc::channel::<LspMessage>(100);
@@ -268,11 +350,29 @@ async fn main_loop<B: ratatui::backend::Backend>(
 
     if let Some(ref exec) = app.executor {
         let input = exec.json_input.clone();
+        let initial_query = app.query_input.textarea.lines()[0].clone();
+        let q = if initial_query.trim().is_empty() {
+            ".".to_string()
+        } else {
+            initial_query
+        };
         if let Ok(Ok(results)) =
-            tokio::task::spawn_blocking(move || Executor::execute(".", &input)).await
+            tokio::task::spawn_blocking(move || Executor::execute(&q, &input)).await
         {
             app.results = results;
         }
+    }
+
+    if !app.query_input.textarea.lines()[0].is_empty() {
+        let query_prefix = crate::suggestions::current_query_prefix(app);
+        app.query_input.suggestions = crate::suggestions::compute_suggestions(
+            &query_prefix,
+            app.executor.as_ref().map(|e| &e.json_input),
+            &state.lsp_completions,
+            state.cached_pipe_type.as_deref(),
+        );
+        app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+        state.suggestion_active = app.query_input.show_suggestions;
     }
 
     if let (Some(m), Some(at)) = (app.footer_message.take(), app.footer_message_at.take()) {
@@ -320,4 +420,177 @@ async fn main_loop<B: ratatui::backend::Backend>(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cursor_positive_within_bounds_unchanged() {
+        assert_eq!(resolve_cursor(Some(2), 5), 2);
+    }
+
+    #[test]
+    fn cursor_positive_clamped_to_query_length() {
+        assert_eq!(resolve_cursor(Some(999), 3), 3);
+    }
+
+    #[test]
+    fn cursor_positive_zero_for_empty_query() {
+        assert_eq!(resolve_cursor(Some(0), 0), 0);
+    }
+
+    #[test]
+    fn cursor_negative_minus_one_is_end() {
+        // Semantic: -1 is index of last char, so cursor is placed BEFORE it?
+        // Task 7.4 second part says resolved to 3 for len 4.
+        assert_eq!(resolve_cursor(Some(-1), 4), 3);
+    }
+
+    #[test]
+    fn cursor_negative_minus_query_len_is_start() {
+        // If len 4, -4 is index 0.
+        assert_eq!(resolve_cursor(Some(-4), 4), 0);
+    }
+
+    #[test]
+    fn cursor_negative_more_than_query_len_clamps_to_zero() {
+        assert_eq!(resolve_cursor(Some(-999), 3), 0);
+    }
+
+    #[test]
+    fn cursor_negative_mid_query() {
+        assert_eq!(resolve_cursor(Some(-3), 10), 7);
+    }
+
+    #[test]
+    fn single_file_not_wrapped_in_array() {
+        let temp = std::env::temp_dir().join("single_input_test.json");
+        std::fs::write(&temp, b"{\"a\":1}").unwrap();
+        let (raw, labels) = load_inputs(&[temp.clone()], true).unwrap();
+        assert_eq!(labels, vec!["single_input_test.json"]);
+        assert_eq!(String::from_utf8_lossy(&raw), "{\"a\":1}");
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn two_files_merged_into_array() {
+        let t1 = std::env::temp_dir().join("two_files_1.json");
+        let t2 = std::env::temp_dir().join("two_files_2.json");
+        std::fs::write(&t1, b"1").unwrap();
+        std::fs::write(&t2, b"2").unwrap();
+        let (raw, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(val, json!([1, 2]));
+        let _ = std::fs::remove_file(t1);
+        let _ = std::fs::remove_file(t2);
+    }
+
+    #[test]
+    fn non_json_file_becomes_string_in_array() {
+        let t1 = std::env::temp_dir().join("non_json_1.json");
+        let t2 = std::env::temp_dir().join("non_json_2.txt");
+        std::fs::write(&t1, b"1").unwrap();
+        std::fs::write(&t2, b"hello").unwrap();
+        let (raw, _) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(val, json!([1, "hello"]));
+
+        let _ = std::fs::remove_file(t1);
+        let _ = std::fs::remove_file(t2);
+    }
+
+    #[test]
+    fn mixed_types_preserved_in_merged_array() {
+        let t1 = std::env::temp_dir().join("mixed_1.json");
+        let t2 = std::env::temp_dir().join("mixed_2.json");
+        let t3 = std::env::temp_dir().join("mixed_3.json");
+        std::fs::write(&t1, b"{\"x\":1}").unwrap();
+        std::fs::write(&t2, b"[1,2]").unwrap();
+        std::fs::write(&t3, b"\"foo\"").unwrap();
+        let (raw, _) = load_inputs(&[t1.clone(), t2.clone(), t3.clone()], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(val, json!([{"x":1}, [1,2], "foo"]));
+        let _ = std::fs::remove_file(t1);
+        let _ = std::fs::remove_file(t2);
+        let _ = std::fs::remove_file(t3);
+    }
+
+    #[test]
+    fn duplicate_file_produces_two_entries() {
+        let t1 = std::env::temp_dir().join("dup_1.json");
+        std::fs::write(&t1, b"1").unwrap();
+        let (raw, labels) = load_inputs(&[t1.clone(), t1.clone()], true).unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(val, json!([1, 1]));
+        assert_eq!(labels, vec!["dup_1.json", "dup_1.json"]);
+        let _ = std::fs::remove_file(t1);
+    }
+
+    #[test]
+    fn source_label_for_two_files() {
+        let t1 = std::env::temp_dir().join("label_1.json");
+        let t2 = std::env::temp_dir().join("label_2.json");
+        std::fs::write(&t1, b"1").unwrap();
+        std::fs::write(&t2, b"2").unwrap();
+        let (_, labels) = load_inputs(&[t1.clone(), t2.clone()], true).unwrap();
+        assert_eq!(labels, vec!["label_1.json", "label_2.json"]);
+        let _ = std::fs::remove_file(t1);
+        let _ = std::fs::remove_file(t2);
+    }
+
+    #[test]
+    fn default_query_is_dot_slice_for_two_inputs() {
+        let t1 = std::env::temp_dir().join("dq_1.json");
+        let t2 = std::env::temp_dir().join("dq_2.json");
+        std::fs::write(&t1, b"1").unwrap();
+        std::fs::write(&t2, b"2").unwrap();
+
+        let args = Args {
+            files: vec![t1, t2],
+            query: None,
+            cursor: None,
+            no_lsp: false,
+            debug: false,
+            config: None,
+            print_config: false,
+            print_output: false,
+            print_query: false,
+            print_input: false,
+        };
+
+        let stdin_is_terminal = true;
+        let (_, labels) = load_inputs(&args.files, stdin_is_terminal).unwrap();
+        let mut final_args = args;
+        if labels.len() > 1 && final_args.query.is_none() {
+            final_args.query = Some(".[]".to_string());
+        }
+        assert_eq!(final_args.query.as_deref(), Some(".[]"));
+    }
+
+    #[test]
+    fn explicit_query_overrides_dot_slice_default() {
+        let t1 = std::env::temp_dir().join("eq_1.json");
+        let t2 = std::env::temp_dir().join("eq_2.json");
+        std::fs::write(&t1, b"1").unwrap();
+        std::fs::write(&t2, b"2").unwrap();
+
+        let args = Args {
+            files: vec![t1, t2],
+            query: Some(".[] | .name".to_string()),
+            cursor: None,
+            no_lsp: false,
+            debug: false,
+            config: None,
+            print_config: false,
+            print_output: false,
+            print_query: false,
+            print_input: false,
+        };
+
+        let stdin_is_terminal = true;
+        let (_, labels) = load_inputs(&args.files, stdin_is_terminal).unwrap();
+        let mut final_args = args;
+        if labels.len() > 1 && final_args.query.is_none() {
+            final_args.query = Some(".[]".to_string());
+        }
+        assert_eq!(final_args.query.as_deref(), Some(".[] | .name"));
+    }
 }

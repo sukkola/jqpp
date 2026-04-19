@@ -1,6 +1,7 @@
 use crate::accept::{
     apply_selected_suggestion, commit_current_string_param_input, cursor_col_after_accept,
-    expand_string_param_prefix_with_tab, starts_context_aware_function_call,
+    expand_string_param_prefix_with_tab, is_string_param_value_suggestion,
+    starts_context_aware_function_call,
 };
 use crate::hints::{
     clear_dismissed_hint_if_query_changed, dismiss_structural_hint, maybe_activate_structural_hint,
@@ -27,30 +28,25 @@ pub fn handle_query_input_key(
 
     if is_action(keymap::Action::Submit) {
         state.string_param_expansion_stack.clear();
-        if app.query_input.show_suggestions && !app.query_input.suggestions.is_empty() {
+        let can_apply_hidden_string_param_selection = if !app.query_input.show_suggestions
+            && state.suggestion_active
+            && !app.query_input.suggestions.is_empty()
+        {
             let cur = app.query_input.textarea.cursor().1;
             let full = app.query_input.textarea.lines()[0].clone();
-            if let Some((new_text, col)) = commit_current_string_param_input(&full, cur) {
-                app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
-                app.query_input.textarea.set_block(
-                    ratatui::widgets::Block::default()
-                        .title(" Query ")
-                        .borders(ratatui::widgets::Borders::ALL),
-                );
-                app.query_input
-                    .textarea
-                    .set_cursor_line_style(ratatui::style::Style::default());
-                app.query_input
-                    .textarea
-                    .move_cursor(tui_textarea::CursorMove::Jump(0, col));
-                app.query_input.show_suggestions = false;
-                state.suggestion_active = false;
-                state.lsp_completions.clear();
-                state.cached_pipe_type = None;
-                state.last_edit_at = Instant::now() - state.debounce_duration;
-                state.debounce_pending = true;
-                return;
-            }
+            let query_prefix: String = full.chars().take(cur).collect();
+            let selected = &app.query_input.suggestions[app.query_input.suggestion_index];
+            is_string_param_value_suggestion(selected.detail.as_deref())
+                && jqpp::completions::json_context::string_param_context(&query_prefix).is_some()
+        } else {
+            false
+        };
+
+        if (app.query_input.show_suggestions || can_apply_hidden_string_param_selection)
+            && !app.query_input.suggestions.is_empty()
+        {
+            let cur = app.query_input.textarea.cursor().1;
+            let full = app.query_input.textarea.lines()[0].clone();
 
             let selected = app.query_input.suggestions[app.query_input.suggestion_index].clone();
             let suggestion = selected.insert_text;
@@ -75,6 +71,30 @@ pub fn handle_query_input_key(
             state.last_edit_at = Instant::now() - state.debounce_duration;
             state.debounce_pending = true;
         } else {
+            let cur = app.query_input.textarea.cursor().1;
+            let full = app.query_input.textarea.lines()[0].clone();
+            if let Some((new_text, col)) = commit_current_string_param_input(&full, cur) {
+                app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
+                app.query_input.textarea.set_block(
+                    ratatui::widgets::Block::default()
+                        .title(" Query ")
+                        .borders(ratatui::widgets::Borders::ALL),
+                );
+                app.query_input
+                    .textarea
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                app.query_input
+                    .textarea
+                    .move_cursor(tui_textarea::CursorMove::Jump(0, col));
+                app.query_input.show_suggestions = false;
+                state.suggestion_active = false;
+                state.lsp_completions.clear();
+                state.cached_pipe_type = None;
+                state.last_edit_at = Instant::now() - state.debounce_duration;
+                state.debounce_pending = true;
+                return;
+            }
+
             app.query_input.show_suggestions = false;
             state.suggestion_active = false;
             let query = app.query_input.textarea.lines()[0].clone();
@@ -485,14 +505,14 @@ mod tests {
     use super::*;
     use jqpp::app::App;
     use jqpp::keymap::Keymap;
+    use jqpp::widgets;
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
-    use std::collections::HashMap;
 
     #[test]
     fn test_esc_rolls_back_tab_expansion() {
         let mut app = App::new();
         let mut state = LoopState::new();
-        let keymap = Keymap(HashMap::new());
+        let keymap = Keymap::default();
 
         let original_query = "startswith(\"A\"".to_string();
         let original_col = original_query.len();
@@ -527,7 +547,7 @@ mod tests {
     fn test_text_edit_clears_expansion_stack() {
         let mut app = App::new();
         let mut state = LoopState::new();
-        let keymap = Keymap(HashMap::new());
+        let keymap = Keymap::default();
 
         state
             .string_param_expansion_stack
@@ -540,5 +560,143 @@ mod tests {
         handle_query_input_key(&mut app, &mut state, char_key, &keymap);
 
         assert!(state.string_param_expansion_stack.is_empty());
+    }
+
+    #[test]
+    fn test_enter_applies_selected_suggestion_instead_of_committing_partial_input() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        // 1. Setup a query with an existing value and cursor inside
+        // startswith("Alice")
+        let full_query = "startswith(\"Alice\")".to_string();
+        let cursor_col = 16; // Cursor between 'e' and '"' -> startswith("Alic|e")
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![full_query.clone()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor_col as u16));
+
+        // 2. Mock suggestions showing, with "Bob" selected at index 1
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![
+            widgets::query_input::Suggestion {
+                label: "Alice".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alice\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "Bob".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Bob\")".to_string(),
+            },
+        ];
+        app.query_input.suggestion_index = 1; // "Bob"
+
+        // 3. Trigger Enter (Submit)
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        // 4. Verify result: should be "Bob", not "Alic"
+        assert_eq!(app.query_input.textarea.lines()[0], "startswith(\"Bob\")");
+    }
+
+    #[test]
+    fn test_enter_commits_partial_input_if_suggestions_hidden() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        // startswith("Alic|e")
+        let full_query = "startswith(\"Alice\")".to_string();
+        let cursor_col = 16;
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![full_query.clone()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor_col as u16));
+
+        // Suggestions are NOT showing
+        app.query_input.show_suggestions = false;
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        // Should commit current input "Alic" -> startswith("Alic")
+        assert_eq!(app.query_input.textarea.lines()[0], "startswith(\"Alic\")");
+    }
+
+    #[test]
+    fn test_enter_applies_string_value_selection_when_dropdown_auto_closes() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        // Cursor is still inside the existing value.
+        let full_query = "startswith(\"Alice\")".to_string();
+        let cursor_col = 16; // startswith("Alic|e")
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![full_query]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor_col as u16));
+
+        // Suggestions remain available but dropdown is hidden.
+        app.query_input.show_suggestions = false;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![
+            widgets::query_input::Suggestion {
+                label: "Alice".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Alice\")".to_string(),
+            },
+            widgets::query_input::Suggestion {
+                label: "Bob".to_string(),
+                detail: Some("string value".to_string()),
+                insert_text: "startswith(\"Bob\")".to_string(),
+            },
+        ];
+        app.query_input.suggestion_index = 1;
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], "startswith(\"Bob\")");
+    }
+
+    #[test]
+    fn test_hidden_non_string_suggestions_still_submit_current_query() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![".items[".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, 7));
+
+        app.query_input.show_suggestions = false;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "[]".to_string(),
+            detail: None,
+            insert_text: ".items[]".to_string(),
+        }];
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        // Without a visible dropdown (and outside string-param context), Enter should submit as-is.
+        assert_eq!(app.query_input.textarea.lines()[0], ".items[");
     }
 }

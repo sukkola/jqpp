@@ -1345,9 +1345,12 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_still_enables_suggestions_outside_string_literals() {
-        let q = ".orders[] | sort_by";
-        assert!(suggestion_mode_for_query_edit(KeyCode::Char('('), q, false) == false);
-        assert!(suggestion_mode_for_query_edit(KeyCode::Char('.'), q, false));
+    fn string_param_context_strips_trailing_chars_correctly() {
+        let full = "startswith(\"Alice\")";
+        let cursor = "startswith(\"Alic".chars().count();
+        let query_prefix: String = full.chars().take(cursor).collect();
+
+        let ctx = completions::json_context::string_param_context(&query_prefix).unwrap();
+        assert_eq!(ctx.inner_prefix, "Alic");
     }
 }

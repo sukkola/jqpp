@@ -26,6 +26,7 @@ signal-hook = "0.3"
 [dev-dependencies]
 libc = "0.2"
 insta = { version = "1", features = ["yaml"] }
+tempfile = "3"
 
 [[bin]]
 name = "jqpp"
