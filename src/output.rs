@@ -1,4 +1,9 @@
 use anyhow::{Context, Result};
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+use arboard::SetExtLinux;
 use jaq_fmts::Format;
 use jqpp::app::App;
 use jqpp::executor::{Executor, val_to_json};
