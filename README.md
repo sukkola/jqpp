@@ -27,6 +27,7 @@ While tools like [`jqp`](https://github.com/noahgorstein/jqp) provide a great in
 ### Homebrew (macOS/Linux)
 
 ```bash
+brew tap sukkola/tap
 brew install sukkola/tap/jqpp
 ```
 
