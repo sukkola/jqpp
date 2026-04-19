@@ -91,12 +91,14 @@ pub fn starts_context_aware_function_call(suggestion: &str) -> bool {
 }
 
 pub fn apply_suggestion_with_suffix(suggestion: &str, suffix: &str) -> String {
-    let suffix = if suggestion.ends_with(')') && suffix.starts_with(')') {
-        &suffix[1..]
-    } else {
-        suffix
-    };
-    format!("{}{}", suggestion, suffix)
+    let mut s_idx = 0;
+    if (suggestion.ends_with(')') && suffix.starts_with(')'))
+        || (suggestion.ends_with(']') && suffix.starts_with(']'))
+        || (suggestion.ends_with('}') && suffix.starts_with('}'))
+    {
+        s_idx = 1;
+    }
+    format!("{}{}", suggestion, &suffix[s_idx..])
 }
 
 pub fn is_string_param_value_suggestion(detail: Option<&str>) -> bool {
@@ -349,6 +351,20 @@ mod tests {
             apply_suggestion_with_suffix("split(\"-\")", ") | ."),
             "split(\"-\") | ."
         );
+    }
+
+    #[test]
+    fn suggestion_accept_drops_redundant_closing_bracket_from_suffix() {
+        assert_eq!(apply_suggestion_with_suffix("[0]", "]"), "[0]");
+        assert_eq!(
+            apply_suggestion_with_suffix(".products[0]", "].name"),
+            ".products[0].name"
+        );
+    }
+
+    #[test]
+    fn suggestion_accept_drops_redundant_closing_brace_from_suffix() {
+        assert_eq!(apply_suggestion_with_suffix("{field: .", "}"), "{field: .}");
     }
 
     #[test]
