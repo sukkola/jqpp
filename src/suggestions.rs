@@ -39,7 +39,12 @@ pub async fn handle_finished_computes(app: &mut App<'_>, state: &mut LoopState) 
                     .query_input
                     .suggestions
                     .iter()
-                    .all(|s| s.insert_text == state.pending_qp);
+                    .all(|s| s.insert_text == state.pending_qp)
+                && !app
+                    .query_input
+                    .suggestions
+                    .iter()
+                    .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
             if all_exact {
                 app.query_input.show_suggestions = false;
                 state.suggestion_active = false;
@@ -85,7 +90,12 @@ pub async fn run_debounced_compute(
                     .query_input
                     .suggestions
                     .iter()
-                    .all(|s| s.insert_text == query_prefix);
+                    .all(|s| s.insert_text == query_prefix)
+                && !app
+                    .query_input
+                    .suggestions
+                    .iter()
+                    .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
             if all_exact {
                 app.query_input.show_suggestions = false;
                 state.suggestion_active = false;
@@ -142,13 +152,16 @@ pub async fn run_debounced_compute(
                                 .map(|v| completions::jq_builtins::jq_type_of(&v).to_string())
                         }
                     } else {
-                        // No pipe — infer type from the query result itself so builtin
-                        // suggestions are filtered to what's actually applicable.
+                        // No pipe — try to infer type from the query result; fall back to
+                        // the raw input type so partial/invalid queries still filter builtins.
                         main_result
                             .as_ref()
                             .ok()
                             .and_then(|(results, _)| results.first())
                             .map(|v| completions::jq_builtins::jq_type_of(v).to_string())
+                            .or_else(|| {
+                                Some(completions::jq_builtins::jq_type_of(&input).to_string())
+                            })
                     };
                     (main_result, pipe_type)
                 }));
@@ -196,7 +209,12 @@ pub fn handle_lsp_message(app: &mut App<'_>, state: &mut LoopState, msg: LspMess
                         .query_input
                         .suggestions
                         .iter()
-                        .all(|s| s.insert_text == query_prefix);
+                        .all(|s| s.insert_text == query_prefix)
+                    && !app
+                        .query_input
+                        .suggestions
+                        .iter()
+                        .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
                 if all_exact {
                     app.query_input.show_suggestions = false;
                     state.suggestion_active = false;
@@ -216,9 +234,15 @@ pub fn compute_suggestions(
     lsp_completions: &[completions::CompletionItem],
     pipe_context_type: Option<&str>,
 ) -> Vec<widgets::query_input::Suggestion> {
+    let in_contains_builder_context = completions::json_context::param_field_context(query_prefix)
+        .map(|ctx| ctx.fn_name == "contains")
+        .unwrap_or(false);
     let in_string_param_context =
-        completions::json_context::string_param_context(query_prefix).is_some();
-    if is_inside_string_literal(query_prefix) && !in_string_param_context {
+        completions::json_context::string_param_context(query_prefix, pipe_context_type).is_some();
+    if is_inside_string_literal(query_prefix)
+        && !in_string_param_context
+        && !in_contains_builder_context
+    {
         return Vec::new();
     }
 
@@ -267,6 +291,7 @@ pub fn compute_suggestions(
 
     let (eval_input, eval_tail) = if let Some(input) = json_input {
         if let Some((head, tail)) = split_at_last_pipe(query_prefix) {
+            let tail_is_contains_builder = tail.trim_start().starts_with("contains(");
             let eval_query = Executor::strip_format_op(&head)
                 .map(|(base, _)| base)
                 .unwrap_or(head);
@@ -275,6 +300,8 @@ pub fn compute_suggestions(
                 .and_then(|mut r| {
                     if r.is_empty() {
                         None
+                    } else if tail_is_contains_builder && r.len() > 1 {
+                        Some(serde_json::Value::Array(r))
                     } else {
                         Some(r.swap_remove(0))
                     }
@@ -300,6 +327,18 @@ pub fn compute_suggestions(
         Vec::new()
     };
 
+    // When no pipe context type was supplied (e.g. no pipe in query, or async
+    // task hasn't resolved yet), derive it from eval_input so that type-gated
+    // builtins like strftime (Number) are suppressed at the root level.
+    let derived_pipe_type: Option<String> = if pipe_context_type.is_none() {
+        eval_input
+            .as_ref()
+            .map(|v| completions::jq_builtins::jq_type_of(v).to_string())
+    } else {
+        None
+    };
+    let effective_pipe_type = pipe_context_type.or(derived_pipe_type.as_deref());
+
     let with_pipe_prefix = |items: Vec<completions::CompletionItem>| {
         items
             .into_iter()
@@ -311,11 +350,11 @@ pub fn compute_suggestions(
     };
 
     let builtin_completions: Vec<completions::CompletionItem> = with_pipe_prefix(
-        completions::jq_builtins::get_completions(token, pipe_context_type),
+        completions::jq_builtins::get_completions(token, effective_pipe_type),
     );
 
     let all_builtin_completions: Vec<completions::CompletionItem> = with_pipe_prefix(
-        completions::jq_builtins::get_completions("", pipe_context_type),
+        completions::jq_builtins::get_completions("", effective_pipe_type),
     );
 
     let fuzzy_builtin_completions: Vec<completions::CompletionItem> =
@@ -344,7 +383,29 @@ pub fn compute_suggestions(
     let lsp_patched: Vec<completions::CompletionItem> =
         build_lsp_suggestions(lsp_completions, token, prefix);
 
-    let mut merged = json_completions;
+    let variable_completions = if let Some(partial) = token.strip_prefix('$') {
+        extract_bound_variables(query_prefix)
+            .into_iter()
+            .filter(|name| name.starts_with(partial))
+            .map(|name| completions::CompletionItem {
+                label: format!("${}", name),
+                detail: Some("bound variable".to_string()),
+                insert_text: format!("{}${}", prefix, name),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut merged = variable_completions;
+    for item in json_completions {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.label == item.label)
+        {
+            merged.push(item);
+        }
+    }
     for item in builtin_completions {
         if !merged
             .iter()
@@ -395,7 +456,7 @@ pub fn current_query_prefix(app: &App<'_>) -> String {
 }
 
 pub fn active_string_param_prefix_query(query: &str) -> Option<String> {
-    completions::json_context::string_param_context(query)?;
+    completions::json_context::string_param_context(query, None)?;
 
     let mut depth: i32 = 0;
     let mut open_paren: Option<usize> = None;
@@ -472,7 +533,7 @@ pub fn split_at_last_pipe(query: &str) -> Option<(String, String)> {
 }
 
 pub fn split_string_param_query_prefix(query: &str) -> Option<(String, String)> {
-    completions::json_context::string_param_context(query)?;
+    completions::json_context::string_param_context(query, None)?;
 
     let open = crate::accept::find_unmatched_open_paren(query)?;
     let before_open = query[..open].trim_end();
@@ -676,7 +737,7 @@ pub fn suggestion_mode_for_query_edit(
     _current_active: bool,
 ) -> bool {
     if is_inside_double_quoted_string(query_prefix)
-        && completions::json_context::string_param_context(query_prefix).is_none()
+        && completions::json_context::string_param_context(query_prefix, None).is_none()
     {
         return false;
     }
@@ -698,6 +759,59 @@ pub fn suggestion_mode_for_query_edit(
         }
         _ => false,
     }
+}
+
+pub fn extract_bound_variables(query_prefix: &str) -> Vec<String> {
+    let bytes = query_prefix.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'a' || bytes[i + 1] != b's' {
+            i += 1;
+            continue;
+        }
+
+        if i > 0 {
+            let prev = bytes[i - 1] as char;
+            if prev.is_ascii_alphanumeric() || prev == '_' {
+                i += 1;
+                continue;
+            }
+        }
+
+        let mut j = i + 2;
+        let mut had_space = false;
+        while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
+            had_space = true;
+            j += 1;
+        }
+        if !had_space || j >= bytes.len() || bytes[j] != b'$' {
+            i += 1;
+            continue;
+        }
+
+        j += 1;
+        let name_start = j;
+        while j < bytes.len() {
+            let ch = bytes[j] as char;
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if j > name_start {
+            let name = &query_prefix[name_start..j];
+            if seen.insert(name.to_string()) {
+                out.push(name.to_string());
+            }
+        }
+        i = j;
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -760,7 +874,8 @@ mod tests {
 
     #[test]
     fn fuzzy_results_appear_with_tilde_detail_when_no_exact_prefix() {
-        let input = serde_json::json!({"customer_name": "alice"});
+        // ascii_upcase is a string function — use string input so it is eligible.
+        let input = serde_json::json!("alice");
         let suggestions = compute_suggestions("up", Some(&input), &[], None);
 
         assert!(suggestions.iter().any(|s| {
@@ -770,7 +885,8 @@ mod tests {
 
     #[test]
     fn exact_results_appear_before_fuzzy_results() {
-        let input = serde_json::json!({});
+        // startswith / tostring are string functions — use string input so both are eligible.
+        let input = serde_json::json!("");
         let suggestions = compute_suggestions("st", Some(&input), &[], None);
 
         let exact_pos = suggestions.iter().position(|s| {
@@ -1012,22 +1128,20 @@ mod tests {
     #[test]
     fn builtins_filtered_to_string_type_when_pipe_context_is_string() {
         let input = serde_json::json!({"name": "Alice"});
-        // Use a pipe-terminated prefix so the token is empty and all type-filtered
-        // builtins are candidates (token="" matches everything).
+        // Explicit string context: after `.name |` the pipe value is a string.
         let string_suggestions = compute_suggestions(".name | ", Some(&input), &[], Some("string"));
-        let all_suggestions = compute_suggestions(".name | ", Some(&input), &[], None);
-
-        assert!(
-            string_suggestions.len() < all_suggestions.len(),
-            "string-typed suggestions ({}) should be fewer than unfiltered ({})",
-            string_suggestions.len(),
-            all_suggestions.len()
-        );
+        // Object context: no pipe, root is an object — derived type is "object".
+        let object_suggestions = compute_suggestions("", Some(&input), &[], None);
 
         // ascii_upcase is a string-only builtin — must appear in string context
         assert!(
             string_suggestions.iter().any(|s| s.label == "ascii_upcase"),
             "ascii_upcase should be suggested for string context"
+        );
+        // ascii_upcase must NOT appear for object context
+        assert!(
+            !object_suggestions.iter().any(|s| s.label == "ascii_upcase"),
+            "ascii_upcase should not be suggested for object context"
         );
 
         // length applies to any type — must appear in both
@@ -1036,14 +1150,53 @@ mod tests {
             "length should be suggested for string context"
         );
         assert!(
-            all_suggestions.iter().any(|s| s.label == "length"),
-            "length should be suggested with no context"
+            object_suggestions.iter().any(|s| s.label == "length"),
+            "length should be suggested for object context"
         );
 
         // keys is object/array only — must NOT appear in string context
         assert!(
             !string_suggestions.iter().any(|s| s.label == "keys"),
             "keys should not be suggested for string context"
+        );
+        // keys must appear for object context
+        assert!(
+            object_suggestions.iter().any(|s| s.label == "keys"),
+            "keys should be suggested for object context"
+        );
+    }
+
+    #[test]
+    fn strftime_absent_for_object_root_input() {
+        // strftime requires a number — must not appear when root input is an object,
+        // even with no explicit pipe_context_type (the common case when typing at root).
+        let input = serde_json::json!({"ts": 1700000000});
+        let suggestions = compute_suggestions("strf", Some(&input), &[], None);
+        assert!(
+            !suggestions.iter().any(|s| s.label == "strftime"),
+            "strftime should not be suggested when root input is an object"
+        );
+    }
+
+    #[test]
+    fn strptime_absent_for_object_root_input() {
+        // strptime requires a string — must not appear when root input is an object.
+        let input = serde_json::json!({"date": "2024-01-01"});
+        let suggestions = compute_suggestions("strp", Some(&input), &[], None);
+        assert!(
+            !suggestions.iter().any(|s| s.label == "strptime"),
+            "strptime should not be suggested when root input is an object"
+        );
+    }
+
+    #[test]
+    fn strftime_appears_for_number_root_input() {
+        // strftime should appear when root input IS a number.
+        let input = serde_json::json!(1700000000);
+        let suggestions = compute_suggestions("strf", Some(&input), &[], None);
+        assert!(
+            suggestions.iter().any(|s| s.label == "strftime"),
+            "strftime should be suggested when root input is a number"
         );
     }
 
@@ -1264,6 +1417,101 @@ mod tests {
     }
 
     #[test]
+    fn contains_object_value_suggestions_include_all_items_after_pipe_evaluation() {
+        let input = serde_json::json!({
+            "orders": [
+                {"order_id": "ORD-001", "status": "shipped"},
+                {"order_id": "ORD-002", "status": "processing"}
+            ]
+        });
+
+        let s = compute_suggestions(
+            ".orders[]|contains({order_id: \"ORD-",
+            Some(&input),
+            &[],
+            Some("object"),
+        );
+
+        assert!(s.iter().any(|i| i.label == "ORD-001"));
+        assert!(s.iter().any(|i| i.label == "ORD-002"));
+    }
+
+    #[test]
+    fn contains_object_value_suggestions_work_when_returning_to_existing_field() {
+        let input = serde_json::json!({
+            "orders": [
+                {"order_id": "ORD-001", "status": "shipped"},
+                {"order_id": "ORD-002", "status": "processing"}
+            ]
+        });
+
+        let s = compute_suggestions(
+            ".orders[]|contains({order_id: \"ORD-",
+            Some(&input),
+            &[],
+            None,
+        );
+
+        assert!(s.iter().any(|i| i.label == "ORD-001"));
+        assert!(s.iter().any(|i| i.label == "ORD-002"));
+    }
+
+    #[test]
+    fn extract_bound_variables_handles_required_patterns() {
+        assert_eq!(extract_bound_variables("5 as $x |"), vec!["x".to_string()]);
+        assert_eq!(
+            extract_bound_variables(".[] as $item | $item.tags[] as $tag |"),
+            vec!["item".to_string(), "tag".to_string()]
+        );
+        assert_eq!(
+            extract_bound_variables("reduce .[] as $acc (0;"),
+            vec!["acc".to_string()]
+        );
+        assert_eq!(
+            extract_bound_variables("foreach .[] as $x (0;"),
+            vec!["x".to_string()]
+        );
+        assert!(extract_bound_variables(".foo | .bar").is_empty());
+        assert!(extract_bound_variables("").is_empty());
+    }
+
+    #[test]
+    fn dollar_token_offers_bound_variables_with_filtering() {
+        let all = compute_suggestions("5 as $x | 10 as $y | $", None, &[], None);
+        assert!(all.iter().any(|s| s.label == "$x"));
+        assert!(all.iter().any(|s| s.label == "$y"));
+        assert!(
+            all.iter()
+                .filter(|s| s.label == "$x" || s.label == "$y")
+                .all(|s| s.detail.as_deref() == Some("bound variable"))
+        );
+
+        let filtered = compute_suggestions("5 as $foo | 10 as $bar | $f", None, &[], None);
+        assert!(filtered.iter().any(|s| s.label == "$foo"));
+        assert!(!filtered.iter().any(|s| s.label == "$bar"));
+
+        let none = compute_suggestions("5 as $foo | $z", None, &[], None);
+        assert!(none.iter().all(|s| s.label != "$foo"));
+    }
+
+    #[test]
+    fn dollar_token_bound_variables_precede_lsp_items() {
+        let lsp = vec![completions::CompletionItem {
+            label: "$x_ext".to_string(),
+            detail: Some("lsp".to_string()),
+            insert_text: "$x_ext".to_string(),
+        }];
+        let suggestions = compute_suggestions("1 as $x | $", None, &lsp, None);
+
+        let var_pos = suggestions.iter().position(|s| s.label == "$x").unwrap();
+        let lsp_pos = suggestions
+            .iter()
+            .position(|s| s.label == "$x_ext")
+            .unwrap();
+        assert!(var_pos < lsp_pos);
+    }
+
+    #[test]
     fn active_string_param_prefix_query_extracts_pipe_prefix() {
         assert_eq!(
             active_string_param_prefix_query("ascii_upcase|endswith(\""),
@@ -1454,7 +1702,7 @@ mod tests {
         let cursor = "startswith(\"Alic".chars().count();
         let query_prefix: String = full.chars().take(cursor).collect();
 
-        let ctx = completions::json_context::string_param_context(&query_prefix).unwrap();
+        let ctx = completions::json_context::string_param_context(&query_prefix, None).unwrap();
         assert_eq!(ctx.inner_prefix, "Alic");
     }
 }

@@ -1,6 +1,9 @@
 use crate::accept::{
-    apply_selected_suggestion, commit_current_string_param_input, cursor_col_after_accept,
-    expand_string_param_prefix_with_tab, is_string_param_value_suggestion,
+    apply_contains_builder_suggestion, apply_numeric_builder_suggestion, apply_selected_suggestion,
+    commit_current_string_param_input, cursor_col_after_accept,
+    expand_string_param_prefix_with_tab, finalize_contains_builder_on_escape,
+    finalize_numeric_builder_on_escape, is_contains_builder_suggestion,
+    is_numeric_builder_suggestion, is_string_param_value_suggestion,
     starts_context_aware_function_call,
 };
 use crate::hints::{
@@ -37,7 +40,8 @@ pub fn handle_query_input_key(
             let query_prefix: String = full.chars().take(cur).collect();
             let selected = &app.query_input.suggestions[app.query_input.suggestion_index];
             is_string_param_value_suggestion(selected.detail.as_deref())
-                && jqpp::completions::json_context::string_param_context(&query_prefix).is_some()
+                && jqpp::completions::json_context::string_param_context(&query_prefix, None)
+                    .is_some()
         } else {
             false
         };
@@ -50,8 +54,33 @@ pub fn handle_query_input_key(
 
             let selected = app.query_input.suggestions[app.query_input.suggestion_index].clone();
             let suggestion = selected.insert_text;
-            let (new_text, col) =
-                apply_selected_suggestion(&suggestion, selected.detail.as_deref(), &full, cur);
+            let (new_text, col, keep_active) =
+                if is_contains_builder_suggestion(selected.detail.as_deref()) {
+                    // Enter on contains-builder value finalizes current selection set.
+                    apply_contains_builder_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                        true,
+                    )
+                } else if is_numeric_builder_suggestion(selected.detail.as_deref()) {
+                    apply_numeric_builder_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                        true,
+                    )
+                } else {
+                    let (t, c) = apply_selected_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                    );
+                    (t, c, starts_context_aware_function_call(&suggestion))
+                };
             app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
             app.query_input.textarea.set_block(
                 ratatui::widgets::Block::default()
@@ -64,8 +93,8 @@ pub fn handle_query_input_key(
             app.query_input
                 .textarea
                 .move_cursor(tui_textarea::CursorMove::Jump(0, col));
-            app.query_input.show_suggestions = false;
-            state.suggestion_active = starts_context_aware_function_call(&suggestion);
+            app.query_input.show_suggestions = keep_active;
+            state.suggestion_active = keep_active;
             state.lsp_completions.clear();
             state.cached_pipe_type = None;
             state.last_edit_at = Instant::now() - state.debounce_duration;
@@ -200,8 +229,33 @@ pub fn handle_query_input_key(
 
             let selected = app.query_input.suggestions[app.query_input.suggestion_index].clone();
             let suggestion = selected.insert_text;
-            let (new_text, col) =
-                apply_selected_suggestion(&suggestion, selected.detail.as_deref(), &full, cur);
+            let (new_text, col, keep_active) =
+                if is_contains_builder_suggestion(selected.detail.as_deref()) {
+                    // Tab on contains-builder keeps the builder open for additional items.
+                    apply_contains_builder_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                        false,
+                    )
+                } else if is_numeric_builder_suggestion(selected.detail.as_deref()) {
+                    apply_numeric_builder_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                        false,
+                    )
+                } else {
+                    let (t, c) = apply_selected_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
+                    );
+                    (t, c, starts_context_aware_function_call(&suggestion))
+                };
             app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
             app.query_input.textarea.set_block(
                 ratatui::widgets::Block::default()
@@ -214,8 +268,8 @@ pub fn handle_query_input_key(
             app.query_input
                 .textarea
                 .move_cursor(tui_textarea::CursorMove::Jump(0, col));
-            app.query_input.show_suggestions = false;
-            state.suggestion_active = starts_context_aware_function_call(&suggestion);
+            app.query_input.show_suggestions = keep_active;
+            state.suggestion_active = keep_active;
             state.lsp_completions.clear();
             state.cached_pipe_type = None;
             state.last_edit_at = Instant::now() - state.debounce_duration;
@@ -319,6 +373,41 @@ pub fn handle_query_input_key(
             state.suggestion_active = false;
             state.last_esc_at = Some(Instant::now());
         } else if app.query_input.show_suggestions {
+            let cur = app.query_input.textarea.cursor().1;
+            let full = app.query_input.textarea.lines()[0].clone();
+            if let Some((new_query, col)) = finalize_numeric_builder_on_escape(&full, cur) {
+                app.query_input.textarea = tui_textarea::TextArea::from(vec![new_query]);
+                app.query_input.textarea.set_block(
+                    ratatui::widgets::Block::default()
+                        .title(" Query ")
+                        .borders(ratatui::widgets::Borders::ALL),
+                );
+                app.query_input
+                    .textarea
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                app.query_input
+                    .textarea
+                    .move_cursor(tui_textarea::CursorMove::Jump(0, col));
+                app.query_input.show_suggestions = false;
+                state.suggestion_active = false;
+                return;
+            }
+            if let Some((new_text, col)) = finalize_contains_builder_on_escape(&full, cur) {
+                app.query_input.textarea = tui_textarea::TextArea::from(vec![new_text]);
+                app.query_input.textarea.set_block(
+                    ratatui::widgets::Block::default()
+                        .title(" Query ")
+                        .borders(ratatui::widgets::Borders::ALL),
+                );
+                app.query_input
+                    .textarea
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                app.query_input
+                    .textarea
+                    .move_cursor(tui_textarea::CursorMove::Jump(0, col));
+                state.last_edit_at = Instant::now() - state.debounce_duration;
+                state.debounce_pending = true;
+            }
             app.query_input.show_suggestions = false;
             state.suggestion_active = false;
             app.structural_hint_active = false;
@@ -504,9 +593,11 @@ pub fn handle_pane_key(app: &mut App<'_>, _state: &mut LoopState, key: KeyEvent,
 mod tests {
     use super::*;
     use jqpp::app::App;
+    use jqpp::executor::Executor;
     use jqpp::keymap::Keymap;
     use jqpp::widgets;
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use serde_json::json;
 
     #[test]
     fn test_esc_rolls_back_tab_expansion() {
@@ -698,5 +789,457 @@ mod tests {
 
         // Without a visible dropdown (and outside string-param context), Enter should submit as-is.
         assert_eq!(app.query_input.textarea.lines()[0], ".items[");
+    }
+
+    #[test]
+    fn tab_on_contains_array_value_keeps_builder_open_with_comma() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec!["contains([\"123\", ".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "foo".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"123\", \"foo\"".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let tab_key = KeyEvent::new(
+            KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            "contains([\"123\", \"foo\", "
+        );
+        assert!(app.query_input.show_suggestions);
+        assert!(state.suggestion_active);
+    }
+
+    #[test]
+    fn enter_on_contains_array_value_finalizes_and_closes_builder() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec!["contains([\"123\", ".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "foo".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"123\", \"foo\"".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            "contains([\"123\", \"foo\"])"
+        );
+        assert!(!app.query_input.show_suggestions);
+        assert!(!state.suggestion_active);
+    }
+
+    #[test]
+    fn enter_on_contains_object_key_keeps_builder_open_for_value_selection() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec![".orders[] | contains({".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "order_id".to_string(),
+            detail: Some("contains object key".to_string()),
+            insert_text: ".orders[] | contains({order_id: ".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            ".orders[] | contains({order_id: "
+        );
+        assert!(app.query_input.show_suggestions);
+        assert!(state.suggestion_active);
+    }
+
+    #[test]
+    fn esc_on_contains_array_builder_removes_trailing_comma_and_closes_array() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec!["contains([\"123\", \"foo\", ".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "bar".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"123\", \"foo\", \"bar\"".to_string(),
+        }];
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            "contains([\"123\", \"foo\"])"
+        );
+        assert!(!app.query_input.show_suggestions);
+        assert!(!state.suggestion_active);
+    }
+
+    #[test]
+    fn esc_on_contains_object_builder_removes_trailing_comma_and_closes_object() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![
+            ".orders[] | contains({order_id: \"ORD-001\", ".to_string(),
+        ]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "status".to_string(),
+            detail: Some("contains object key".to_string()),
+            insert_text: ".orders[] | contains({order_id: \"ORD-001\", status: ".to_string(),
+        }];
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            ".orders[] | contains({order_id: \"ORD-001\"})"
+        );
+        assert!(!app.query_input.show_suggestions);
+        assert!(!state.suggestion_active);
+        let q = &app.query_input.textarea.lines()[0];
+        assert!(Executor::execute_query(q, &json!({"orders":[{"order_id":"ORD-001"}]})).is_ok());
+    }
+
+    #[test]
+    fn enter_on_existing_contains_array_edit_finalizes_without_trailing_comma() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        let query = "contains([\"foo\", \"bar\", )".to_string();
+        let cursor = "contains([\"foo\", \"bar\", ".chars().count();
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![query]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor as u16));
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "bar baz".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"foo\", \"bar\", \"bar baz\"".to_string(),
+        }];
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            "contains([\"foo\", \"bar\", \"bar baz\"])"
+        );
+        assert!(!app.query_input.textarea.lines()[0].ends_with(','));
+    }
+
+    #[test]
+    fn tab_on_existing_contains_array_edit_replaces_value_and_starts_next() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        let query = "contains([\"foo\", \"bar\"])".to_string();
+        let cursor = "contains([\"foo\", \"b".chars().count();
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![query]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor as u16));
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "bar baz".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"foo\", \"bar baz\"".to_string(),
+        }];
+
+        let tab_key = KeyEvent::new(
+            KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            "contains([\"foo\", \"bar baz\", "
+        );
+        assert!(app.query_input.show_suggestions);
+        assert!(state.suggestion_active);
+    }
+
+    #[test]
+    fn esc_after_tab_on_existing_contains_array_edit_closes_valid_query() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec!["contains([\"foo\", \"bar baz\", ".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "next".to_string(),
+            detail: Some("contains array value".to_string()),
+            insert_text: "contains([\"foo\", \"bar baz\", \"next\"".to_string(),
+        }];
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        let q = &app.query_input.textarea.lines()[0];
+        assert_eq!(q, "contains([\"foo\", \"bar baz\"])");
+        assert!(Executor::execute_query(q, &json!(["foo", "bar baz", "zzz"])).is_ok());
+    }
+
+    #[test]
+    fn test_flatten_builder_tab_moves_to_end() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["flat".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "flatten".to_string(),
+            detail: Some("flatten nested arrays".to_string()),
+            insert_text: "flatten()".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let tab_key = KeyEvent::new(
+            KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], "flatten()");
+        assert_eq!(app.query_input.textarea.cursor().1, 8); // inside ()
+        assert!(app.query_input.show_suggestions);
+
+        // Second tab moves to end and closes
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+        assert_eq!(app.query_input.textarea.cursor().1, 9);
+        assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn test_range_builder_tab_jumps_after_semicolon() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["ran".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "range".to_string(),
+            detail: Some("integer generator".to_string()),
+            insert_text: "range()".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let tab_key = KeyEvent::new(
+            KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], "range()");
+        assert_eq!(app.query_input.textarea.cursor().1, 6); // inside ()
+
+        // Second tab adds semicolon
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+        assert_eq!(app.query_input.textarea.lines()[0], "range(; )");
+        assert_eq!(app.query_input.textarea.cursor().1, 8); // after "; "
+        assert!(app.query_input.show_suggestions);
+
+        // Third tab adds second semicolon
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+        assert_eq!(app.query_input.textarea.lines()[0], "range(; ; )");
+        assert_eq!(app.query_input.textarea.cursor().1, 10);
+        assert!(app.query_input.show_suggestions);
+
+        // Fourth tab moves to end and closes
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+        assert_eq!(app.query_input.textarea.cursor().1, 11);
+        assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn test_range_builder_tab_adds_semicolon_if_missing() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["range(0)".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, 8)); // after 0
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "range".to_string(),
+            detail: Some("integer generator".to_string()),
+            insert_text: "range()".to_string(),
+        }];
+
+        let tab_key = KeyEvent::new(
+            KeyCode::Tab,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, tab_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], "range(0; )");
+        assert_eq!(app.query_input.textarea.cursor().1, 9); // inside ()
+        assert!(app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn test_builder_enter_moves_inside_on_initial_acceptance() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["ran".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "range".to_string(),
+            detail: Some("integer generator".to_string()),
+            insert_text: "range()".to_string(),
+        }];
+        app.query_input.suggestion_index = 0;
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.lines()[0], "range()");
+        assert_eq!(app.query_input.textarea.cursor().1, 6); // inside ()
+        assert!(app.query_input.show_suggestions); // Keep active for parameters
+    }
+
+    #[test]
+    fn test_builder_enter_finalizes_if_already_inside() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["range(0; 10)".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, 6));
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "range".to_string(),
+            detail: Some("integer generator".to_string()),
+            insert_text: "range()".to_string(),
+        }];
+
+        let enter_key = KeyEvent::new(
+            KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, enter_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.cursor().1, 12); // end
+        assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn test_builder_esc_moves_to_end_and_closes() {
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["range(0; 10)".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, 6)); // at 0
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(app.query_input.textarea.cursor().1, 12); // end
+        assert!(!app.query_input.show_suggestions);
     }
 }

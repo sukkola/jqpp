@@ -13,7 +13,7 @@ pub enum InputType {
     Array,
     ArrayOfScalars,
     Object,
-    StringOrArray, // length, indices, contains, …
+    StringOrArray, // length, indices, …
     ArrayOrObject, // keys, values, has, map_values, …
 }
 
@@ -115,6 +115,24 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "parse date string",
         InputType::String,
     ),
+    (
+        "strptime",
+        "strptime(\"%Y-%m-%dT%H:%M:%S\")",
+        "parse ISO datetime string",
+        InputType::String,
+    ),
+    (
+        "strptime",
+        "strptime(\"%d/%m/%Y\")",
+        "parse day/month/year string",
+        InputType::String,
+    ),
+    (
+        "strptime",
+        "strptime(\"%H:%M:%S\")",
+        "parse time string",
+        InputType::String,
+    ),
     ("@base64d", "@base64d", "decode base64", InputType::String),
     ("@uri", "@uri", "percent-encode for URI", InputType::String),
     ("@html", "@html", "escape HTML entities", InputType::String),
@@ -122,13 +140,13 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     (
         "@csv",
         "@csv",
-        "encode row as CSV",
+        "encode row as CSV (jqpp extension; limited in jaq)",
         InputType::ArrayOfScalars,
     ),
     (
         "@tsv",
         "@tsv",
-        "encode row as TSV",
+        "encode row as TSV (jqpp extension; limited in jaq)",
         InputType::ArrayOfScalars,
     ),
     // ── numbers ───────────────────────────────────────────────────────────────
@@ -178,15 +196,27 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         InputType::Number,
     ),
     (
-        "gmtime",
-        "gmtime",
-        "UNIX ts → broken-down",
+        "strftime",
+        "strftime(\"%Y-%m-%dT%H:%M:%SZ\")",
+        "format as ISO datetime",
         InputType::Number,
     ),
     (
-        "ascii",
-        "ascii",
-        "codepoint → char string",
+        "strftime",
+        "strftime(\"%H:%M:%S\")",
+        "format as time",
+        InputType::Number,
+    ),
+    (
+        "strftime",
+        "strftime(\"%Y/%m/%d %H:%M\")",
+        "format as date and time",
+        InputType::Number,
+    ),
+    (
+        "gmtime",
+        "gmtime",
+        "UNIX ts → broken-down",
         InputType::Number,
     ),
     // ── arrays ────────────────────────────────────────────────────────────────
@@ -207,8 +237,21 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     (
         "flatten",
-        "flatten",
+        "flatten()",
         "flatten nested arrays",
+        InputType::Array,
+    ),
+    ("range", "range()", "integer generator", InputType::Any),
+    (
+        "reduce",
+        "reduce .[] as $x (0; . + $x)",
+        "fold / accumulate",
+        InputType::Any,
+    ),
+    (
+        "flatten",
+        "flatten(1)",
+        "flatten N levels deep",
         InputType::Array,
     ),
     ("reverse", "reverse", "reverse order", InputType::Array),
@@ -293,14 +336,20 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     (
         "values",
         "values",
-        "values as array",
+        "filter nulls (select(. != null))",
         InputType::ArrayOrObject,
     ),
     (
-        "has",
-        "has(\"key\")",
-        "test for key / index",
-        InputType::ArrayOrObject,
+        "contains",
+        "contains()",
+        "array contains all elements from RHS subset",
+        InputType::Array,
+    ),
+    (
+        "contains",
+        "contains()",
+        "object contains RHS as partial deep match",
+        InputType::Object,
     ),
     (
         "map_values",
@@ -315,10 +364,16 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         InputType::ArrayOrObject,
     ),
     (
-        "contains",
-        "contains()",
-        "test containment",
-        InputType::ArrayOrObject,
+        "has",
+        "has()",
+        "test object key presence",
+        InputType::Object,
+    ),
+    (
+        "has",
+        "has()",
+        "test array index presence",
+        InputType::Array,
     ),
     // ── strings or arrays ─────────────────────────────────────────────────────
     // `length` works on string, number, array, object, null — but NOT boolean.
@@ -328,6 +383,12 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "length",
         "count chars / elements",
         InputType::NonBoolean,
+    ),
+    (
+        "contains",
+        "contains()",
+        "string contains substring",
+        InputType::String,
     ),
     (
         "indices",
@@ -356,9 +417,9 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ("path", "path()", "path to value", InputType::Any),
     ("paths", "paths", "all paths in value", InputType::Any),
     (
-        "leaf_paths",
-        "leaf_paths",
-        "paths to leaf values",
+        "paths",
+        "paths(scalars)",
+        "paths filtered by predicate",
         InputType::Any,
     ),
     (
@@ -387,20 +448,42 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     ("recurse", "recurse", "recursive descent", InputType::Any),
     (
+        "recurse",
+        "recurse(.[]?)",
+        "safe recursive descent (error-suppressed)",
+        InputType::Any,
+    ),
+    (
         "walk",
         "walk(if type == \"array\" then sort else . end)",
         "depth-first walk",
         InputType::Any,
     ),
     ("env", "env", "environment variables", InputType::Any),
-    ("debug", "debug", "print to stderr", InputType::Any),
+    (
+        "input",
+        "input",
+        "read next input value (limited in jaq)",
+        InputType::Any,
+    ),
+    (
+        "inputs",
+        "inputs",
+        "stream remaining input values (limited in jaq)",
+        InputType::Any,
+    ),
+    (
+        "debug",
+        "debug",
+        "print to stderr (jaq: no message argument)",
+        InputType::Any,
+    ),
     ("error", "error(\"msg\")", "raise error", InputType::Any),
     ("empty", "empty", "produce no output", InputType::Any),
     ("null", "null", "null literal", InputType::Any),
     ("true", "true", "boolean true", InputType::Any),
     ("false", "false", "boolean false", InputType::Any),
     ("now", "now", "current UNIX timestamp", InputType::Any),
-    ("builtins", "builtins", "list all built-ins", InputType::Any),
     ("limit", "limit(10; .[])", "take N outputs", InputType::Any),
     (
         "first",
@@ -413,6 +496,18 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "range",
         "range(10)",
         "0..N integer generator",
+        InputType::Any,
+    ),
+    (
+        "range",
+        "range(0; 10)",
+        "from..to integer generator",
+        InputType::Any,
+    ),
+    (
+        "range",
+        "range(0; 10; 2)",
+        "from..to step integer generator",
         InputType::Any,
     ),
     (
@@ -439,28 +534,13 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "repeat while condition",
         InputType::Any,
     ),
-    (
-        "recurse_down",
-        "recurse_down",
-        "recursive descent (alias)",
-        InputType::Any,
-    ),
     ("@base64", "@base64", "encode as base64", InputType::String),
     ("@json", "@json", "format as JSON string", InputType::Any),
     ("@text", "@text", "same as tostring", InputType::Any),
-    ("input", "input", "next input value", InputType::Any),
-    ("inputs", "inputs", "remaining input values", InputType::Any),
-    ("contains", "contains()", "test containment", InputType::Any),
     (
         "inside",
         "inside(null)",
         "test if inside value",
-        InputType::Any,
-    ),
-    (
-        "format",
-        "format(\"text\")",
-        "string interpolation",
         InputType::Any,
     ),
     ("infinite", "infinite", "IEEE infinity", InputType::Any),
@@ -494,8 +574,8 @@ pub fn get_completions(token: &str, input_type: Option<&str>) -> Vec<CompletionI
             if matches!(input_type, Some(jq_type) if !type_filter.compatible_with(jq_type)) {
                 continue;
             }
-            // Deduplicate by name (the same name appears in multiple InputType rows).
-            if seen.insert(name) {
+            // Deduplicate by name and insert_text (allows variants for same name).
+            if seen.insert((name, insert_text)) {
                 out.push(CompletionItem {
                     label: name.to_string(),
                     detail: Some(detail.to_string()),
@@ -631,9 +711,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for item in &c {
             assert!(
-                seen.insert(item.label.clone()),
-                "duplicate label: {}",
-                item.label
+                seen.insert((item.label.clone(), item.insert_text.clone())),
+                "duplicate item (label + insert_text): {} ({})",
+                item.label,
+                item.insert_text
             );
         }
     }
@@ -703,6 +784,109 @@ mod tests {
         assert_eq!(jq_type_of(&json!({})), "object");
         assert_eq!(jq_type_of(&json!(true)), "boolean");
         assert_eq!(jq_type_of(&json!(null)), "null");
+    }
+
+    #[test]
+    fn flatten_depth_form_appears_for_array() {
+        let c = get_completions("flatten", Some("array"));
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "flatten()"));
+    }
+
+    #[test]
+    fn flatten_entries_absent_for_non_array() {
+        let c = get_completions("flatten", Some("string"));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn range_all_three_forms_appear() {
+        let c = get_completions("range", None);
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "range()"));
+    }
+
+    #[test]
+    fn paths_predicate_form_appears() {
+        let c = get_completions("paths", None);
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "paths"));
+        assert!(texts.iter().any(|s| *s == "paths(scalars)"));
+    }
+
+    #[test]
+    fn recurse_safe_form_appears() {
+        let c = get_completions("recurse", None);
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "recurse"));
+        assert!(texts.iter().any(|s| *s == "recurse(.[]?)"));
+    }
+
+    #[test]
+    fn strptime_format_variants_appear_for_string() {
+        let c = get_completions("strptime", Some("string"));
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "strptime(\"%Y-%m-%d\")"));
+        assert!(
+            texts
+                .iter()
+                .any(|s| *s == "strptime(\"%Y-%m-%dT%H:%M:%S\")")
+        );
+        assert!(texts.iter().any(|s| *s == "strptime(\"%d/%m/%Y\")"));
+        assert!(texts.iter().any(|s| *s == "strptime(\"%H:%M:%S\")"));
+    }
+
+    #[test]
+    fn strftime_format_variants_appear_for_number() {
+        let c = get_completions("strftime", Some("number"));
+        let texts: Vec<_> = c.iter().map(|i| &i.insert_text).collect();
+        assert!(texts.iter().any(|s| *s == "strftime(\"%Y-%m-%d\")"));
+        assert!(
+            texts
+                .iter()
+                .any(|s| *s == "strftime(\"%Y-%m-%dT%H:%M:%SZ\")")
+        );
+        assert!(texts.iter().any(|s| *s == "strftime(\"%H:%M:%S\")"));
+        assert!(texts.iter().any(|s| *s == "strftime(\"%Y/%m/%d %H:%M\")"));
+    }
+
+    #[test]
+    fn strptime_absent_for_number_input() {
+        let c = get_completions("strptime", Some("number"));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn strftime_absent_for_string_input() {
+        let c = get_completions("strftime", Some("string"));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn strftime_absent_for_object_input() {
+        let c = get_completions("strftime", Some("object"));
+        assert!(
+            c.is_empty(),
+            "strftime should not appear for object input — it requires a number"
+        );
+    }
+
+    #[test]
+    fn strptime_absent_for_object_input() {
+        let c = get_completions("strptime", Some("object"));
+        assert!(
+            c.is_empty(),
+            "strptime should not appear for object input — it requires a string"
+        );
+    }
+
+    #[test]
+    fn values_detail_string_reflects_jaq_semantics() {
+        let c = get_completions("values", None);
+        let values = c.iter().find(|i| i.label == "values").unwrap();
+        let detail = values.detail.as_ref().unwrap();
+        assert!(!detail.contains("values as array"));
+        assert!(detail.contains("select") || detail.contains("null"));
     }
 
     #[test]
@@ -820,6 +1004,67 @@ mod tests {
         let any = get_completions("", None);
         let path = any.iter().find(|i| i.label == "path").unwrap();
         assert_eq!(path.insert_text, "path()");
+    }
+
+    #[test]
+    fn has_insert_text_starts_empty_param_context() {
+        let obj = get_completions("has", Some("object"));
+        assert_eq!(
+            obj.iter().find(|i| i.label == "has").unwrap().insert_text,
+            "has()"
+        );
+
+        let arr = get_completions("has", Some("array"));
+        assert_eq!(
+            arr.iter().find(|i| i.label == "has").unwrap().insert_text,
+            "has()"
+        );
+
+        let unknown = get_completions("has", None);
+        assert_eq!(
+            unknown
+                .iter()
+                .find(|i| i.label == "has")
+                .unwrap()
+                .insert_text,
+            "has()"
+        );
+    }
+
+    #[test]
+    fn contains_insert_text_starts_empty_param_context_and_deduped() {
+        let string = get_completions("contains", Some("string"));
+        assert_eq!(
+            string
+                .iter()
+                .find(|i| i.label == "contains")
+                .unwrap()
+                .insert_text,
+            "contains()"
+        );
+
+        let array = get_completions("contains", Some("array"));
+        assert_eq!(
+            array
+                .iter()
+                .find(|i| i.label == "contains")
+                .unwrap()
+                .insert_text,
+            "contains()"
+        );
+
+        let object = get_completions("contains", Some("object"));
+        assert_eq!(
+            object
+                .iter()
+                .find(|i| i.label == "contains")
+                .unwrap()
+                .insert_text,
+            "contains()"
+        );
+
+        let unknown = get_completions("contains", None);
+        assert_eq!(unknown.iter().filter(|i| i.label == "contains").count(), 1);
     }
 
     // ── Boolean type exclusions ───────────────────────────────────────────────

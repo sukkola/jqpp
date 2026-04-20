@@ -123,6 +123,155 @@ To disable LSP for a session, pass `--no-lsp`. To use a binary at a custom path,
 JQPP_LSP_BIN=/usr/local/bin/jq-lsp jqpp data.json
 ```
 
+## Intellisense Coverage
+
+jqpp provides three levels of intellisense for jq/jaq built-in functions:
+
+| Level | Meaning |
+|---|---|
+| **Full** | Type-aware suggestion **and** live param completions — argument values are drawn from the actual JSON input (field names, string values, array indices). |
+| **Partial** | Type-aware suggestion with a static insert template. The function appears only when the right type flows into the pipe, but arguments are not auto-completed from the data. |
+| **–** | No intellisense. Function is not in the catalog (unsupported by jaq, or a jq construct jqpp does not expose). |
+
+### String functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `ascii_downcase` / `ascii_upcase` | Partial | |
+| `ltrimstr` | **Full** | Suggests actual prefixes found in the live JSON data |
+| `rtrimstr` | **Full** | Suggests actual suffixes found in the live JSON data |
+| `startswith` | **Full** | Suggests actual prefixes found in the live JSON data |
+| `endswith` | **Full** | Suggests actual suffixes found in the live JSON data |
+| `split` | **Full** | Infers the most common delimiters from the live JSON data |
+| `test` | Partial | Regex argument not completed |
+| `match` | Partial | Regex argument not completed |
+| `capture` | Partial | Regex argument not completed |
+| `scan` | Partial | Regex argument not completed |
+| `sub` / `gsub` | Partial | Regex and replacement arguments not completed |
+| `explode` | Partial | |
+| `fromjson` | Partial | |
+| `tonumber` | Partial | |
+| `strptime` | Partial | Format string not completed |
+| `@base64` / `@base64d` | Partial | |
+| `@uri` | Partial | |
+| `@html` | Partial | |
+| `@sh` | Partial | |
+| `@json` / `@text` | Partial | |
+| `@csv` | Partial | jqpp extension — not native to jaq |
+| `@tsv` | Partial | jqpp extension — not native to jaq |
+
+### Number functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `floor` / `ceil` / `round` | Partial | |
+| `sqrt` / `fabs` | Partial | |
+| `log` / `log2` / `log10` | Partial | |
+| `exp` / `exp2` / `exp10` | Partial | |
+| `pow` | Partial | |
+| `isnan` / `isinfinite` / `isfinite` / `isnormal` | Partial | |
+| `nan` / `infinite` | Partial | |
+| `tostring` | Partial | |
+| `strftime` | Partial | Format string not completed |
+| `gmtime` / `mktime` | Partial | |
+
+### Array functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `sort` | Partial | |
+| `sort_by` | **Full** | Suggests field names from the first array element |
+| `group_by` | **Full** | Suggests field names from the first array element |
+| `unique` | Partial | |
+| `unique_by` | **Full** | Suggests field names from the first array element |
+| `flatten` | Partial | |
+| `reverse` | Partial | |
+| `add` | Partial | |
+| `min` / `max` | Partial | |
+| `min_by` / `max_by` | **Full** | Suggests field names from the first array element |
+| `map` | Partial | Inner expression not completed |
+| `map_values` | Partial | Inner expression not completed |
+| `any` / `all` | Partial | Predicate not completed |
+| `first` / `last` / `nth` | Partial | |
+| `transpose` | Partial | |
+| `implode` | Partial | Requires array of codepoints (`array_scalars`) |
+| `from_entries` | Partial | |
+| `inside` | Partial | |
+
+### Object functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `to_entries` / `from_entries` / `with_entries` | Partial | |
+| `keys` / `keys_unsorted` / `values` | Partial | |
+| `del` | **Full** | Suggests field names/paths from the live JSON input |
+| `has` | Partial | Planned: Full (live key / index completions) |
+
+### String-or-array functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `contains` | Partial | Planned: Full (type-adaptive insert text + string-value completions for string input); currently shows generic template |
+| `index` / `rindex` / `indices` | **Full** | Suggests actual values found at the context path in the live JSON data |
+| `length` | Partial | Excluded for boolean input (`true \| length` is a jq runtime error) |
+| `inside` | Partial | |
+
+### Path and traversal functions
+
+| Function | Level | Notes |
+|---|---|---|
+| `path` | **Full** | Suggests field paths from the live JSON input |
+| `paths` | Partial | |
+| `getpath` | Partial | |
+| `setpath` / `delpaths` | Partial | |
+| `recurse` | Partial | |
+| `walk` | Partial | |
+
+### Control and iteration
+
+| Function | Level | Notes |
+|---|---|---|
+| `select` | Partial | Predicate not completed |
+| `limit` | Partial | |
+| `first(expr)` / `last(expr)` | Partial | Generator-form variants |
+| `range` | Partial | |
+| `reduce` | Partial | `as $var` bindings not yet offered as completions |
+| `foreach` | Partial | `as $var` bindings not yet offered as completions |
+| `until` / `while` | Partial | |
+| `error` | Partial | |
+| `empty` | Partial | |
+| `debug` | Partial | jaq does not support `debug("message")` — bare `debug` only |
+
+### Universal / misc
+
+| Function | Level | Notes |
+|---|---|---|
+| `type` / `not` | Partial | |
+| `tojson` / `tostring` / `tonumber` | Partial | |
+| `now` / `env` | Partial | |
+| `null` / `true` / `false` | Partial | Literal completions |
+| `nan` / `infinite` | Partial | Literal completions |
+
+### Not supported by jaq 3.x
+
+These standard jq features are not available in jqpp because jaq does not implement them. They are intentionally absent from the completion catalog so jqpp never suggests something that would produce a runtime or compile error.
+
+| Feature | Notes |
+|---|---|
+| `builtins` | Not implemented in jaq |
+| `leaf_paths` | Not implemented in jaq; use `paths \| select(scalars)` instead |
+| `ascii` (number → char) | Not implemented in jaq; use `[.] \| implode` instead |
+| `recurse_down` | Alias not defined in jaq; use `recurse` |
+| `input` / `inputs` | jaq has the API but jqpp does not wire it up (single-input tool) |
+| `format("text")` | Not implemented in jaq; use format strings (`@base64`, `@uri`, etc.) directly |
+| `$ENV` | Not available; use `env` object instead |
+| `label` / `break` | Label-break control flow not in jaq |
+| `?//` | Alternative operator not in jaq |
+| `modulemeta` | Module system introspection not in jaq |
+| `$__loc__` | Source location object not in jaq |
+| `INDEX(s; f)` / `IN(s)` / `GROUP_BY(s; f)` | SQL-style operators not in jaq |
+| Streaming (`truncate_stream`, `tostream`, `fromstream`) | Streaming-mode functions not in jaq |
+
 ## Related Projects
 
 - [jaq](https://github.com/01mf02/jaq) — The Rust jq implementation powering jq++.

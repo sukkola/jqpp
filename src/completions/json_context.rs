@@ -4,7 +4,9 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 const FIELD_PATH_ARRAY_FNS: &[&str] = &["sort_by", "group_by", "unique_by", "min_by", "max_by"];
-const FIELD_PATH_INPUT_FNS: &[&str] = &["del", "path"];
+const FIELD_PATH_INPUT_FNS: &[&str] = &["del", "path", "has", "contains", "flatten"];
+// "range" is not in FIELD_PATH_INPUT_FNS: param_field_completions returns early for it
+// anyway, and keeping it context-aware caused keep_active=true with stale suggestions.
 const STRING_PARAM_PREFIX_FNS: &[&str] = &["startswith", "ltrimstr"];
 const STRING_PARAM_SUFFIX_FNS: &[&str] = &["endswith", "rtrimstr"];
 const STRING_PARAM_INTERNAL_FNS: &[&str] = &["split"];
@@ -216,8 +218,23 @@ fn parse_string_param_context(query: &str) -> Option<(StringParamCtx<'_>, usize)
     ))
 }
 
-pub fn string_param_context(query: &str) -> Option<StringParamCtx<'_>> {
-    parse_string_param_context(query).map(|(ctx, _)| ctx)
+fn gate_string_param_context<'a>(
+    ctx: StringParamCtx<'a>,
+    input_type: Option<&str>,
+) -> Option<StringParamCtx<'a>> {
+    if ctx.fn_name == "contains" && matches!(input_type, Some("array" | "array_scalars" | "object"))
+    {
+        return None;
+    }
+    Some(ctx)
+}
+
+pub fn string_param_context<'a>(
+    query: &'a str,
+    input_type: Option<&str>,
+) -> Option<StringParamCtx<'a>> {
+    let (ctx, _) = parse_string_param_context(query)?;
+    gate_string_param_context(ctx, input_type)
 }
 
 fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
@@ -236,6 +253,231 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
             Some(input)
         }
     });
+
+    if ctx.fn_name == "contains" {
+        match context_value {
+            Some(Value::Object(map)) => {
+                let open = query[..ctx.inner_start].rfind('(').unwrap_or(0);
+                let inner_full = &query[open + 1..];
+                let (used, value_key, key_prefix, value_prefix) =
+                    parse_contains_object_state(inner_full);
+
+                if let Some(key) = value_key {
+                    let mut value_base = query[..ctx.inner_start].to_string();
+                    if inner_full.trim_start().starts_with('{')
+                        && !value_base.ends_with('{')
+                        && !value_base.contains('{')
+                    {
+                        value_base.push('{');
+                    }
+                    for lit in scalar_values_for_key(input, ctx.context_path, &key) {
+                        if !lit.trim_matches('"').starts_with(&value_prefix) {
+                            continue;
+                        }
+                        let item = CompletionItem {
+                            label: lit.trim_matches('"').to_string(),
+                            detail: Some("contains object value".to_string()),
+                            insert_text: format!("{}{}: {}", value_base, key, lit),
+                        };
+                        if !out
+                            .iter()
+                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                        {
+                            out.push(item);
+                        }
+                    }
+                } else {
+                    let mut base = query[..ctx.inner_start].to_string();
+                    if !base.contains('{') {
+                        base.push('{');
+                    }
+
+                    for key in map.keys() {
+                        if used.contains(key) || !key.starts_with(&key_prefix) {
+                            continue;
+                        }
+                        let item = CompletionItem {
+                            label: key.clone(),
+                            detail: Some("contains object key".to_string()),
+                            insert_text: format!("{}{}: ", base, key),
+                        };
+                        if !out
+                            .iter()
+                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                        {
+                            out.push(item);
+                        }
+                    }
+                }
+            }
+            Some(Value::Array(arr)) => {
+                let open = query[..ctx.inner_start].rfind('(').unwrap_or(0);
+                let inner_full = &query[open + 1..];
+                let object_mode = {
+                    let t = inner_full.trim_start();
+                    t.starts_with('{') || (!t.starts_with('[') && arr.iter().any(Value::is_object))
+                };
+
+                if object_mode {
+                    let (used, value_key, key_prefix, value_prefix) =
+                        parse_contains_object_state(inner_full);
+                    if let Some(key) = value_key {
+                        let mut value_base = query[..ctx.inner_start].to_string();
+                        if !value_base.contains('{') {
+                            value_base.push('{');
+                        }
+                        for lit in scalar_values_for_key(input, ctx.context_path, &key) {
+                            if !lit.trim_matches('"').starts_with(&value_prefix) {
+                                continue;
+                            }
+                            let item = CompletionItem {
+                                label: lit.trim_matches('"').to_string(),
+                                detail: Some("contains object value".to_string()),
+                                insert_text: format!("{}{}: {}", value_base, key, lit),
+                            };
+                            if !out
+                                .iter()
+                                .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                            {
+                                out.push(item);
+                            }
+                        }
+                    } else {
+                        let mut base = query[..ctx.inner_start].to_string();
+                        if !base.contains('{') {
+                            base.push('{');
+                        }
+                        let mut all_keys: BTreeSet<String> = BTreeSet::new();
+                        for obj in arr.iter().filter_map(Value::as_object) {
+                            for k in obj.keys() {
+                                all_keys.insert(k.clone());
+                            }
+                        }
+                        for key in all_keys {
+                            if used.contains(&key) || !key.starts_with(&key_prefix) {
+                                continue;
+                            }
+                            let item = CompletionItem {
+                                label: key.clone(),
+                                detail: Some("contains object key".to_string()),
+                                insert_text: format!("{}{}: ", base, key),
+                            };
+                            if !out
+                                .iter()
+                                .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                            {
+                                out.push(item);
+                            }
+                        }
+                    }
+                } else {
+                    let used = parse_used_array_scalars(inner_full);
+
+                    let raw_prefix = ctx.inner_prefix.trim_start();
+                    let value_prefix = raw_prefix.trim_start_matches('[').trim_start_matches('"');
+
+                    let scalar_candidates: BTreeSet<String> = arr
+                        .iter()
+                        .filter_map(scalar_json_literal)
+                        .filter(|lit| lit.trim_matches('"').starts_with(value_prefix))
+                        .filter(|lit| !used.contains(lit))
+                        .collect();
+
+                    for lit in &scalar_candidates {
+                        let needs_open_bracket = !query[..ctx.inner_start].contains('[')
+                            && !inner_full.trim_start().starts_with('[');
+                        let item = CompletionItem {
+                            label: lit.trim_matches('"').to_string(),
+                            detail: Some("contains array value".to_string()),
+                            insert_text: format!(
+                                "{}{}{}",
+                                &query[..ctx.inner_start],
+                                if needs_open_bracket { "[" } else { "" },
+                                lit
+                            ),
+                        };
+                        if !out
+                            .iter()
+                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                        {
+                            out.push(item);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if ctx.fn_name == "has" {
+        match context_value {
+            Some(Value::Object(map)) => {
+                let key_prefix = ctx.inner_prefix.trim_start_matches('"');
+                for key in map.keys() {
+                    if key.starts_with(key_prefix) {
+                        let item = CompletionItem {
+                            label: key.clone(),
+                            detail: Some("field".to_string()),
+                            insert_text: format!("{}\"{}\")", &query[..ctx.inner_start], key),
+                        };
+                        if !out
+                            .iter()
+                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                        {
+                            out.push(item);
+                        }
+                    }
+                }
+            }
+            Some(Value::Array(arr)) => {
+                if !ctx.inner_prefix.is_empty()
+                    && !ctx.inner_prefix.chars().all(|c| c.is_ascii_digit())
+                {
+                    return;
+                }
+
+                for i in 0..arr.len() {
+                    let idx = i.to_string();
+                    if idx.starts_with(ctx.inner_prefix) {
+                        let item = CompletionItem {
+                            label: idx,
+                            detail: Some("index".to_string()),
+                            insert_text: format!("{}{})", &query[..ctx.inner_start], i),
+                        };
+                        if !out
+                            .iter()
+                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                        {
+                            out.push(item);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if ctx.fn_name == "flatten" {
+        for i in 1..=3 {
+            let label = i.to_string();
+            if label.starts_with(ctx.inner_prefix) {
+                let item = CompletionItem {
+                    label: label.clone(),
+                    detail: Some("depth".to_string()),
+                    insert_text: format!("{}{})", &query[..ctx.inner_start], label),
+                };
+                if !out
+                    .iter()
+                    .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                {
+                    out.push(item);
+                }
+            }
+        }
+        return;
+    }
 
     let source_obj = if FIELD_PATH_ARRAY_FNS.contains(&ctx.fn_name) {
         match context_value {
@@ -267,6 +509,97 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
             out.push(item);
         }
     }
+}
+
+fn scalar_json_literal(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(format!("\"{}\"", s.replace('"', "\\\""))),
+        Value::Number(_) | Value::Bool(_) | Value::Null => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+fn scalar_values_for_key(input: &Value, context_path: &str, key: &str) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let source_values: Vec<&Value> = if is_path_like(context_path) {
+        find_values_at_path(input, context_path)
+    } else {
+        vec![input]
+    };
+
+    for value in source_values {
+        match value {
+            Value::Object(map) => {
+                if let Some(lit) = map.get(key).and_then(scalar_json_literal) {
+                    out.insert(lit);
+                }
+            }
+            Value::Array(arr) => {
+                for obj in arr.iter().filter_map(|v| v.as_object()) {
+                    if let Some(lit) = obj.get(key).and_then(scalar_json_literal) {
+                        out.insert(lit);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn parse_contains_object_state(inner: &str) -> (HashSet<String>, Option<String>, String, String) {
+    let mut used = HashSet::new();
+    let mut s = inner.trim_start();
+    if let Some(rest) = s.strip_prefix('{') {
+        s = rest;
+    }
+
+    let mut segments: Vec<&str> = s.split(',').collect();
+    let current = segments.pop().unwrap_or("").trim();
+
+    for seg in segments {
+        if let Some((k, _)) = seg.split_once(':') {
+            let key = k.trim().trim_matches('"');
+            if !key.is_empty() {
+                used.insert(key.to_string());
+            }
+        }
+    }
+
+    if let Some((k, v)) = current.split_once(':') {
+        (
+            used,
+            Some(k.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()),
+            String::new(),
+            v.trim().trim_start_matches('"').to_string(),
+        )
+    } else {
+        (
+            used,
+            None,
+            current.trim_start_matches('"').to_string(),
+            String::new(),
+        )
+    }
+}
+
+fn parse_used_array_scalars(existing: &str) -> HashSet<String> {
+    let mut used = HashSet::new();
+    let mut s = existing.trim_start();
+    if let Some(rest) = s.strip_prefix('[') {
+        s = rest;
+    }
+    for segment in s.split(',') {
+        let val = segment.trim();
+        if val.is_empty() {
+            continue;
+        }
+        let trimmed = val.trim_end_matches(']').trim();
+        if !trimmed.is_empty() {
+            used.insert(trimmed.to_string());
+        }
+    }
+    used
 }
 
 fn collect_string_values(val: &Value) -> Vec<&str> {
@@ -423,16 +756,27 @@ fn extract_internal_candidates(strings: &[&str]) -> Vec<String> {
 }
 
 fn extract_fullstring_candidates(strings: &[&str]) -> Vec<String> {
-    strings
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    let mut out = BTreeSet::new();
+    for s in strings {
+        if s.is_empty() {
+            continue;
+        }
+        out.insert((*s).to_string());
+        for token in split_tokens(s) {
+            out.insert(token.to_string());
+        }
+    }
+    out.into_iter().collect()
 }
 
 fn string_param_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
     let Some((ctx, open)) = parse_string_param_context(query) else {
+        return;
+    };
+    let Some(ctx) = gate_string_param_context(
+        ctx,
+        Some(crate::completions::jq_builtins::jq_type_of(input)),
+    ) else {
         return;
     };
 
@@ -1357,82 +1701,98 @@ mod tests {
 
     #[test]
     fn string_param_context_enters_expected_variants() {
-        let split = string_param_context("split(").unwrap();
+        let split = string_param_context("split(", None).unwrap();
         assert_eq!(split.fn_name, "split");
         assert_eq!(split.strategy, StringParamStrategy::Internal);
         assert_eq!(split.context_path, ".");
         assert_eq!(split.inner_prefix, "");
 
-        assert_eq!(string_param_context("split(\"").unwrap().inner_prefix, "");
-        assert_eq!(string_param_context("split(\"-").unwrap().inner_prefix, "-");
+        assert_eq!(
+            string_param_context("split(\"", None).unwrap().inner_prefix,
+            ""
+        );
+        assert_eq!(
+            string_param_context("split(\"-", None)
+                .unwrap()
+                .inner_prefix,
+            "-"
+        );
 
-        let starts = string_param_context("startswith(\"shi").unwrap();
+        let starts = string_param_context("startswith(\"shi", None).unwrap();
         assert_eq!(starts.strategy, StringParamStrategy::Prefix);
         assert_eq!(starts.inner_prefix, "shi");
 
-        let ends = string_param_context("endswith(\".com").unwrap();
+        let ends = string_param_context("endswith(\".com", None).unwrap();
         assert_eq!(ends.strategy, StringParamStrategy::Suffix);
         assert_eq!(ends.inner_prefix, ".com");
 
         assert_eq!(
-            string_param_context("ltrimstr(").unwrap().strategy,
+            string_param_context("ltrimstr(", None).unwrap().strategy,
             StringParamStrategy::Prefix
         );
         assert_eq!(
-            string_param_context("rtrimstr(").unwrap().strategy,
+            string_param_context("rtrimstr(", None).unwrap().strategy,
             StringParamStrategy::Suffix
         );
         assert_eq!(
-            string_param_context("contains(").unwrap().strategy,
+            string_param_context("contains(", Some("string"))
+                .unwrap()
+                .strategy,
+            StringParamStrategy::FullString
+        );
+        assert!(string_param_context("contains(", Some("array")).is_none());
+        assert!(string_param_context("contains(", Some("object")).is_none());
+        assert_eq!(
+            string_param_context("contains(", None).unwrap().strategy,
             StringParamStrategy::FullString
         );
         assert_eq!(
-            string_param_context("index(").unwrap().strategy,
+            string_param_context("index(", None).unwrap().strategy,
             StringParamStrategy::FullString
         );
         assert_eq!(
-            string_param_context("rindex(").unwrap().strategy,
+            string_param_context("rindex(", None).unwrap().strategy,
             StringParamStrategy::FullString
         );
         assert_eq!(
-            string_param_context("indices(").unwrap().strategy,
+            string_param_context("indices(", None).unwrap().strategy,
             StringParamStrategy::FullString
         );
     }
 
     #[test]
     fn string_param_context_pipe_and_nested_function_cases() {
-        let pipe = string_param_context(".orders[].order_status | split(\"_").unwrap();
+        let pipe = string_param_context(".orders[].order_status | split(\"_", None).unwrap();
         assert_eq!(pipe.context_path, ".orders[].order_status");
         assert_eq!(pipe.inner_prefix, "_");
 
-        let nested = string_param_context("map(split(\"").unwrap();
+        let nested = string_param_context("map(split(\"", None).unwrap();
         assert_eq!(nested.fn_name, "split");
         assert_eq!(nested.context_path, ".");
 
-        let piped_fn = string_param_context("ascii_upcase|endswith(\"").unwrap();
+        let piped_fn = string_param_context("ascii_upcase|endswith(\"", None).unwrap();
         assert_eq!(piped_fn.fn_name, "endswith");
         assert_eq!(piped_fn.context_path, ".");
     }
 
     #[test]
     fn string_param_context_exits_and_excludes_functions() {
-        assert!(string_param_context("split(\"-\")").is_none());
-        assert!(string_param_context("split(\"-\") | .").is_none());
-        assert!(string_param_context("split(\"-\").foo").is_none());
+        assert!(string_param_context("split(\"-\")", None).is_none());
+        assert!(string_param_context("split(\"-\") | .", None).is_none());
+        assert!(string_param_context("split(\"-\").foo", None).is_none());
 
-        assert!(string_param_context("test(\"").is_none());
-        assert!(string_param_context("match(\"").is_none());
-        assert!(string_param_context("scan(\"").is_none());
-        assert!(string_param_context("sub(\"").is_none());
-        assert!(string_param_context("gsub(\"").is_none());
-        assert!(string_param_context("capture(\"").is_none());
-        assert!(string_param_context("strptime(\"").is_none());
-        assert!(string_param_context("strftime(\"").is_none());
+        assert!(string_param_context("test(\"", None).is_none());
+        assert!(string_param_context("match(\"", None).is_none());
+        assert!(string_param_context("scan(\"", None).is_none());
+        assert!(string_param_context("sub(\"", None).is_none());
+        assert!(string_param_context("gsub(\"", None).is_none());
+        assert!(string_param_context("capture(\"", None).is_none());
+        assert!(string_param_context("strptime(\"", None).is_none());
+        assert!(string_param_context("strftime(\"", None).is_none());
 
-        assert!(string_param_context("").is_none());
-        assert!(string_param_context(".").is_none());
-        assert!(string_param_context("sort_by(.").is_none());
+        assert!(string_param_context("", None).is_none());
+        assert!(string_param_context(".", None).is_none());
+        assert!(string_param_context("sort_by(.", None).is_none());
     }
 
     #[test]
@@ -1556,9 +1916,8 @@ mod tests {
         let c = get_completions("rtrimstr(", &json!(["alice@example.com"]));
         assert!(has_label(&c, "com"));
 
-        let c = get_completions("contains(", &json!(["shipped", "processing"]));
+        let c = get_completions("contains(", &json!("shipped"));
         assert!(has_label(&c, "shipped"));
-        assert!(has_label(&c, "processing"));
 
         let c = get_completions("index(", &json!(["shipped"]));
         assert!(has_label(&c, "shipped"));
@@ -1655,17 +2014,111 @@ mod tests {
         assert!(get_completions("split(", &json!(null)).is_empty());
         assert!(get_completions(".missing | split(", &json!({"other": ["x"]})).is_empty());
 
-        let c = get_completions("contains(", &json!(["say \"hi\""]));
+        let c = get_completions("contains(", &json!("say \"hi\""));
         assert!(
             c.iter()
                 .any(|i| i.insert_text == "contains(\"say \\\"hi\\\"\")")
         );
 
-        let c = get_completions("contains(", &json!(["abc", "abc"]));
+        let c = get_completions("index(", &json!(["abc", "abc"]));
         let count = c.iter().filter(|i| i.label == "abc").count();
         assert_eq!(count, 1);
 
         let c = get_completions("startswith(\"shiped", &json!(["shipped"]));
         assert!(has_label(&c, "shipped"));
+    }
+
+    #[test]
+    fn contains_object_param_suggestions_support_progressive_building() {
+        let input = json!({"order_id":"ORD-001","status":"shipped","total":42});
+
+        let c = get_completions("contains(", &input);
+        assert!(has_insert(&c, "contains({order_id: "));
+
+        let c = get_completions("contains({", &input);
+        assert!(has_insert(&c, "contains({order_id: "));
+        assert!(has_insert(&c, "contains({status: "));
+
+        let c = get_completions("contains({order_id: ", &input);
+        assert!(has_insert(&c, "contains({order_id: \"ORD-001\""));
+
+        let c = get_completions("contains({order_id: \"ORD-001\", s", &input);
+        assert!(has_insert(&c, "contains({order_id: \"ORD-001\", status: "));
+    }
+
+    #[test]
+    fn contains_object_param_suggestions_resolve_pipe_context() {
+        let input = json!({
+            "orders": [
+                {"order_id":"ORD-001","status":"shipped","total":42},
+                {"order_id":"ORD-002","status":"processing","total":35}
+            ]
+        });
+
+        let c = get_completions(".orders[] | contains({", &input);
+        assert!(has_insert(&c, ".orders[] | contains({order_id: "));
+        assert!(has_insert(&c, ".orders[] | contains({status: "));
+
+        let c = get_completions(".orders[] | contains({order_id: ", &input);
+        assert!(has_label(&c, "ORD-001"));
+        assert!(has_label(&c, "ORD-002"));
+
+        let c = get_completions(".orders[]|contains({order_id: ", &input);
+        assert!(has_label(&c, "ORD-001"));
+        assert!(has_label(&c, "ORD-002"));
+    }
+
+    #[test]
+    fn contains_array_param_suggestions_support_progressive_building() {
+        let input = json!(["hello world", "foo", "bar baz", "123"]);
+
+        let c = get_completions("contains([", &input);
+        assert!(has_insert(&c, "contains([\"foo\""));
+
+        let c = get_completions("contains([\"foo\", b", &input);
+        assert!(has_insert(&c, "contains([\"foo\", \"bar baz\""));
+        assert!(!has_insert(&c, "contains([\"foo\", \"foo\""));
+    }
+
+    #[test]
+    fn contains_string_suggestions_include_tokenized_content() {
+        let input = json!("hello world content");
+
+        let c = get_completions("contains(\"wo", &input);
+        assert!(has_label(&c, "world"));
+
+        let c = get_completions("contains(\"co", &input);
+        assert!(has_label(&c, "content"));
+        assert!(has_label(&c, "hello world content"));
+    }
+
+    #[test]
+    fn param_has_completions_are_type_aware() {
+        let c = get_completions("has(", &json!({"name":"Alice","age":30}));
+        assert!(has_insert(&c, "has(\"name\")"));
+        assert!(has_insert(&c, "has(\"age\")"));
+
+        let c = get_completions(
+            "has(\"na",
+            &json!({"name":"Alice","namespace":"core","age":30}),
+        );
+        assert!(has_insert(&c, "has(\"name\")"));
+        assert!(has_insert(&c, "has(\"namespace\")"));
+        assert!(!has_insert(&c, "has(\"age\")"));
+
+        let c = get_completions("has(", &json!(["a", "b", "c"]));
+        assert!(has_insert(&c, "has(0)"));
+        assert!(has_insert(&c, "has(1)"));
+        assert!(has_insert(&c, "has(2)"));
+
+        let c = get_completions(
+            ".users[] | has(",
+            &json!({"users":[{"id":1,"name":"A"},{"id":2,"name":"B"}]}),
+        );
+        assert!(has_insert(&c, ".users[] | has(\"id\")"));
+        assert!(has_insert(&c, ".users[] | has(\"name\")"));
+
+        let c = get_completions("has(", &json!(42));
+        assert!(c.iter().all(|i| !i.insert_text.starts_with("has(")));
     }
 }

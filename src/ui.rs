@@ -708,4 +708,200 @@ mod tests {
         assert_eq!(arrow, "▲", "expected top arrow at start of track");
         assert_eq!(thumb, "█", "thumb must touch row below top arrow");
     }
+
+    #[test]
+    fn ui_renders_has_empty_parens_and_immediate_key_dropdown() {
+        let input = json!({"name": "Alice", "age": 30});
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: serde_json::to_vec(&input).unwrap(),
+            json_input: input.clone(),
+            source_label: "test".to_string(),
+            source_format: None,
+        });
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["has()".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        let buf = render(&mut app, 80, 24);
+        let query_row = region(&buf, 0, 1, 80, 2);
+        assert!(
+            query_row.contains("has()"),
+            "query row must render has(): {query_row}"
+        );
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["has(".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.suggestions = vec![
+            crate::widgets::query_input::Suggestion {
+                label: "name".to_string(),
+                detail: Some("field".to_string()),
+                insert_text: "has(\"name\")".to_string(),
+            },
+            crate::widgets::query_input::Suggestion {
+                label: "age".to_string(),
+                detail: Some("field".to_string()),
+                insert_text: "has(\"age\")".to_string(),
+            },
+        ];
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestion_index = 0;
+        app.query_input.suggestion_scroll = 0;
+
+        let buf = render(&mut app, 80, 24);
+        let query_row = region(&buf, 0, 1, 80, 2);
+        assert!(
+            query_row.contains("has("),
+            "query row must render has(: {query_row}"
+        );
+
+        let all = region(&buf, 0, 0, 80, 24);
+        assert!(
+            all.contains("name"),
+            "dropdown should render object keys: {all}"
+        );
+        assert!(
+            all.contains("age"),
+            "dropdown should render object keys: {all}"
+        );
+    }
+
+    #[test]
+    fn ui_renders_contains_empty_parens_and_string_value_dropdown() {
+        let input = json!("hello world");
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: b"\"hello world\"".to_vec(),
+            json_input: input.clone(),
+            source_label: "test".to_string(),
+            source_format: None,
+        });
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["contains()".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        let buf = render(&mut app, 80, 24);
+        let query_row = region(&buf, 0, 1, 80, 2);
+        assert!(
+            query_row.contains("contains()"),
+            "query row must render contains(): {query_row}"
+        );
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["contains(".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.suggestions = vec![crate::widgets::query_input::Suggestion {
+            label: "hello world".to_string(),
+            detail: Some("string value".to_string()),
+            insert_text: "contains(\"hello world\")".to_string(),
+        }];
+        app.query_input.show_suggestions = true;
+        app.query_input.suggestion_index = 0;
+        app.query_input.suggestion_scroll = 0;
+
+        let buf = render(&mut app, 80, 24);
+        let query_row = region(&buf, 0, 1, 80, 2);
+        assert!(
+            query_row.contains("contains("),
+            "query row must render contains(: {query_row}"
+        );
+
+        let all = region(&buf, 0, 0, 80, 24);
+        assert!(
+            all.contains("hello world"),
+            "dropdown should render string value suggestions: {all}"
+        );
+    }
+
+    #[test]
+    fn ui_renders_contains_object_builder_suggestions() {
+        let input = json!({
+            "orders": [
+                {"order_id":"ORD-001","status":"shipped","total":42}
+            ]
+        });
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: serde_json::to_vec(&input).unwrap(),
+            json_input: input,
+            source_label: "test".to_string(),
+            source_format: None,
+        });
+
+        app.query_input.textarea =
+            tui_textarea::TextArea::from(vec![".orders[] | contains({".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.suggestions = vec![
+            crate::widgets::query_input::Suggestion {
+                label: "order_id".to_string(),
+                detail: Some("contains object field".to_string()),
+                insert_text: ".orders[] | contains({order_id: \"ORD-001\", ".to_string(),
+            },
+            crate::widgets::query_input::Suggestion {
+                label: "status".to_string(),
+                detail: Some("contains object field".to_string()),
+                insert_text: ".orders[] | contains({status: \"shipped\", ".to_string(),
+            },
+        ];
+        app.query_input.show_suggestions = true;
+
+        let buf = render(&mut app, 100, 28);
+        let all = region(&buf, 0, 0, 100, 28);
+        assert!(
+            all.contains("order_id"),
+            "dropdown should render object keys: {all}"
+        );
+        assert!(
+            all.contains("status"),
+            "dropdown should render object keys: {all}"
+        );
+    }
+
+    #[test]
+    fn ui_renders_contains_array_builder_suggestions() {
+        let input = json!(["hello world", "foo", "bar baz", "123"]);
+        let mut app = App::new();
+        app.executor = Some(Executor {
+            raw_input: serde_json::to_vec(&input).unwrap(),
+            json_input: input,
+            source_label: "test".to_string(),
+            source_format: None,
+        });
+
+        app.query_input.textarea = tui_textarea::TextArea::from(vec!["contains([".to_string()]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::End);
+        app.query_input.suggestions = vec![
+            crate::widgets::query_input::Suggestion {
+                label: "foo".to_string(),
+                detail: Some("contains array value".to_string()),
+                insert_text: "contains([\"foo\", ".to_string(),
+            },
+            crate::widgets::query_input::Suggestion {
+                label: "bar baz".to_string(),
+                detail: Some("contains array value".to_string()),
+                insert_text: "contains([\"bar baz\", ".to_string(),
+            },
+        ];
+        app.query_input.show_suggestions = true;
+
+        let buf = render(&mut app, 100, 28);
+        let all = region(&buf, 0, 0, 100, 28);
+        assert!(
+            all.contains("foo"),
+            "dropdown should render array values: {all}"
+        );
+        assert!(
+            all.contains("bar baz"),
+            "dropdown should render array values: {all}"
+        );
+    }
 }
