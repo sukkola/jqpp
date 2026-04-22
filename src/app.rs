@@ -1,6 +1,40 @@
 use crate::executor::Executor;
-use crate::widgets::query_input::QueryInput;
+use crate::widgets::query_input::{QueryInput, Suggestion};
 use crate::widgets::side_menu::SideMenu;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardKeyword {
+    Foreach,
+    Reduce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WizardStep {
+    Keyword,
+    Stream,
+    StreamSubArg { idx: usize },
+    BindKeyword,
+    VarName,
+    Init,
+    UpdateAccum,
+    UpdateOp,
+    Extract,
+}
+
+#[derive(Debug, Clone)]
+pub struct WizardFrame {
+    pub step: WizardStep,
+    pub saved_query: String,
+    pub saved_cursor: usize,
+    pub saved_suggestions: Vec<Suggestion>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WizardState {
+    pub keyword: WizardKeyword,
+    pub stack: Vec<WizardFrame>,
+    pub var_name: String,
+}
 
 pub enum AppState {
     QueryInput,
@@ -43,6 +77,7 @@ pub struct App<'a> {
     pub structural_hint_active: bool,
     pub dismissed_hint_query: Option<String>,
     pub raw_output: bool,
+    pub wizard_state: Option<WizardState>,
 }
 
 impl<'a> Default for App<'a> {
@@ -81,6 +116,7 @@ impl<'a> App<'a> {
             structural_hint_active: false,
             dismissed_hint_query: None,
             raw_output: false,
+            wizard_state: None,
         }
     }
 

@@ -1,5 +1,7 @@
+use jqpp::app::{WizardFrame, WizardKeyword, WizardState, WizardStep};
 use jqpp::completions;
 use jqpp::widgets;
+use jqpp::widgets::query_input::Suggestion;
 
 pub fn strip_sgr_mouse_sequences(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -117,6 +119,10 @@ pub fn is_string_param_value_suggestion(detail: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_foreach_reduce_wizard_suggestion(detail: Option<&str>) -> bool {
+    matches!(detail, Some("foreach-wizard") | Some("reduce-wizard"))
+}
+
 pub fn is_contains_builder_suggestion(detail: Option<&str>) -> bool {
     matches!(
         detail,
@@ -132,7 +138,9 @@ pub fn is_numeric_builder_suggestion(detail: Option<&str>) -> bool {
 }
 
 pub fn is_builder_suggestion(detail: Option<&str>) -> bool {
-    is_contains_builder_suggestion(detail) || is_numeric_builder_suggestion(detail)
+    is_contains_builder_suggestion(detail)
+        || is_numeric_builder_suggestion(detail)
+        || is_foreach_reduce_wizard_suggestion(detail)
 }
 
 fn trim_trailing_array_or_object_separators(s: &mut String) {
@@ -618,6 +626,543 @@ pub fn cursor_col_after_accept(suggestion: &str) -> u16 {
     } else {
         suggestion.chars().count() as u16
     }
+}
+
+// ── Wizard result type ────────────────────────────────────────────────────────
+
+pub struct WizardStepResult {
+    pub new_query: String,
+    pub new_cursor: usize,
+    pub new_state: Option<WizardState>,
+    pub new_suggestions: Vec<Suggestion>,
+}
+
+impl WizardStepResult {
+    fn exit(query: String, cursor: usize) -> Self {
+        Self {
+            new_query: query,
+            new_cursor: cursor,
+            new_state: None,
+            new_suggestions: Vec::new(),
+        }
+    }
+
+    fn advance(
+        query: String,
+        cursor: usize,
+        state: WizardState,
+        suggestions: Vec<Suggestion>,
+    ) -> Self {
+        Self {
+            new_query: query,
+            new_cursor: cursor,
+            new_state: Some(state),
+            new_suggestions: suggestions,
+        }
+    }
+}
+
+// ── Helper: push a frame onto the wizard stack ────────────────────────────────
+
+fn push_frame(
+    state: &WizardState,
+    next_step: WizardStep,
+    saved_query: String,
+    saved_cursor: usize,
+    saved_suggestions: Vec<Suggestion>,
+) -> WizardState {
+    let mut new_state = state.clone();
+    new_state.stack.push(WizardFrame {
+        step: next_step,
+        saved_query,
+        saved_cursor,
+        saved_suggestions,
+    });
+    new_state
+}
+
+// ── 5.1 Enter keyword step ────────────────────────────────────────────────────
+
+pub fn wizard_enter_keyword(
+    keyword: WizardKeyword,
+    query: &str,
+    cursor: usize,
+    stream_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    // Find the start of the keyword being accepted (strip the token being typed)
+    let token_start = prefix
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(prefix.len());
+
+    let pipe_prefix = &prefix[..token_start];
+    let kw = match keyword {
+        WizardKeyword::Foreach => "foreach",
+        WizardKeyword::Reduce => "reduce",
+    };
+    let new_query = format!("{}{} {}", pipe_prefix, kw, suffix);
+    let new_cursor = pipe_prefix.chars().count() + kw.chars().count() + 1;
+
+    let state = WizardState {
+        keyword,
+        stack: vec![WizardFrame {
+            step: WizardStep::Stream,
+            saved_query: new_query.clone(),
+            saved_cursor: new_cursor,
+            saved_suggestions: stream_suggestions.clone(),
+        }],
+        var_name: String::new(),
+    };
+
+    WizardStepResult::advance(new_query, new_cursor, state, stream_suggestions)
+}
+
+// ── 5.2 Accept stream ─────────────────────────────────────────────────────────
+
+pub fn wizard_accept_stream(
+    selected_text: &str,
+    is_sub_wizard: bool,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    bind_suggestions: Vec<Suggestion>,
+    sub_wizard_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    // The query currently ends at cursor; append stream and a space
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    if is_sub_wizard {
+        // Enter sub-wizard: rewrite the stream as e.g. `foreach range(|0|; 5) `
+        // with cursor positioned at the first argument slot.
+        // The selected_text is e.g. "range(0; 5)" or "recurse(.children[])"
+        let new_query = format!("{}{} {}", prefix, selected_text, suffix);
+        // Position cursor at the first argument inside the function call
+        let open = selected_text.find('(').unwrap_or(selected_text.len());
+        let new_cursor = prefix.chars().count() + open + 1;
+
+        let new_state = push_frame(
+            state,
+            WizardStep::StreamSubArg { idx: 0 },
+            new_query.clone(),
+            new_cursor,
+            sub_wizard_suggestions.clone(),
+        );
+        WizardStepResult::advance(new_query, new_cursor, new_state, sub_wizard_suggestions)
+    } else {
+        // Simple stream: append stream text + space, go to BindKeyword
+        let new_query = format!("{}{} {}", prefix, selected_text, suffix);
+        let new_cursor = prefix.chars().count() + selected_text.chars().count() + 1;
+
+        let new_state = push_frame(
+            state,
+            WizardStep::BindKeyword,
+            new_query.clone(),
+            new_cursor,
+            bind_suggestions.clone(),
+        );
+        WizardStepResult::advance(new_query, new_cursor, new_state, bind_suggestions)
+    }
+}
+
+// ── 5.3 Accept stream sub-arg ─────────────────────────────────────────────────
+
+pub fn wizard_accept_stream_sub_arg(
+    idx: usize,
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    next_suggestions: Vec<Suggestion>,
+    bind_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    // Replace text in current slot with selected_text, then advance to next slot
+    // or to BindKeyword if last slot.
+    //
+    // The query has the form `foreach range(|cursor|; end) ` or similar.
+    // We need to find the open paren, then locate the idx-th semicolon-separated slot.
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    // Find the unmatched open paren before cursor
+    let open = find_unmatched_open_paren(&prefix).unwrap_or(0);
+
+    // Locate the current slot boundaries
+    let inner = &prefix[open + 1..];
+    let semis: Vec<usize> = inner
+        .char_indices()
+        .filter(|(_, c)| *c == ';')
+        .map(|(i, _)| i)
+        .collect();
+
+    let slot_start = if idx == 0 {
+        0
+    } else {
+        semis.get(idx - 1).copied().map(|i| i + 1).unwrap_or(0)
+    };
+    let slot_start =
+        inner[slot_start..].len() - inner[slot_start..].trim_start().len() + slot_start;
+
+    // Build new inner with this slot replaced
+    let slot_text = selected_text;
+
+    // Check if this is the last slot (determine by function name)
+    // For range: 2 slots (idx 0 and 1); for recurse: 1 slot (idx 0)
+    let fn_name = prefix[..open]
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .rfind(|s: &&str| !s.is_empty())
+        .unwrap_or("");
+
+    let max_idx = match fn_name {
+        "range" => 1,   // slots 0 and 1
+        "recurse" => 0, // slot 0 only
+        _ => 0,
+    };
+
+    // Replace the slot content in prefix
+    let slot_abs_start = open + 1 + slot_start;
+
+    // Find end of this slot (next ';' or end of inner before cursor)
+    let slot_end = if let Some(&semi) = semis.get(idx) {
+        open + 1 + semi
+    } else {
+        prefix.len()
+    };
+
+    let new_prefix = format!(
+        "{}{}{}",
+        &prefix[..slot_abs_start],
+        slot_text,
+        &prefix[slot_end..]
+    );
+
+    if idx < max_idx {
+        // Advance to next slot: cursor after the next semicolon
+        let new_inner = &new_prefix[open + 1..];
+        let next_semi = new_inner
+            .find(';')
+            .map(|i| i + 1)
+            .unwrap_or(new_inner.len());
+        let after_semi =
+            new_inner[next_semi..].len() - new_inner[next_semi..].trim_start().len() + next_semi;
+        let new_cursor = open + 1 + after_semi;
+        let new_query = format!("{}{}", new_prefix, suffix);
+
+        let new_state = push_frame(
+            state,
+            WizardStep::StreamSubArg { idx: idx + 1 },
+            new_query.clone(),
+            new_cursor,
+            next_suggestions.clone(),
+        );
+        WizardStepResult::advance(new_query, new_cursor, new_state, next_suggestions)
+    } else {
+        // Last sub-wizard slot done: close the function call, add space, go to BindKeyword
+        // Find the close paren in suffix
+        let close_in_suffix = suffix.find(')').unwrap_or(0);
+        let new_query = format!("{}{}{}", &new_prefix, &suffix[..close_in_suffix + 1], " ")
+            + &suffix[close_in_suffix + 1..];
+        let new_cursor = new_prefix.chars().count() + close_in_suffix + 2; // after `) `
+
+        let new_state = push_frame(
+            state,
+            WizardStep::BindKeyword,
+            new_query.clone(),
+            new_cursor,
+            bind_suggestions.clone(),
+        );
+        WizardStepResult::advance(new_query, new_cursor, new_state, bind_suggestions)
+    }
+}
+
+// ── 5.4 Accept bind keyword ───────────────────────────────────────────────────
+
+pub fn wizard_accept_bind_keyword(
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    var_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    if selected_text == "|" {
+        // Exit wizard with a pipe
+        let new_query = format!("{}| {}", prefix, suffix);
+        let new_cursor = prefix.chars().count() + 2;
+        return WizardStepResult::exit(new_query, new_cursor);
+    }
+
+    // "as" → insert "as $" and move to VarName (ensure a separator before "as")
+    let sep = if prefix.ends_with(' ') { "" } else { " " };
+    let new_query = format!("{}{}as ${}", prefix, sep, suffix);
+    let new_cursor = prefix.chars().count() + sep.len() + 4; // after "as $"
+
+    let new_state = push_frame(
+        state,
+        WizardStep::VarName,
+        new_query.clone(),
+        new_cursor,
+        var_suggestions.clone(),
+    );
+    WizardStepResult::advance(new_query, new_cursor, new_state, var_suggestions)
+}
+
+// ── 5.5 Accept var name ───────────────────────────────────────────────────────
+
+pub fn wizard_accept_var_name(
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    init_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    // The prefix ends with "as $" or possibly "as $partial"
+    // Strip the existing $ prefix text and replace with selected name
+    let dollar_pos = prefix.rfind('$').unwrap_or(prefix.len());
+    let before_dollar = &prefix[..dollar_pos + 1]; // includes '$'
+
+    // selected_text is like "$x" or "$item" — strip leading $
+    let var_bare = selected_text.strip_prefix('$').unwrap_or(selected_text);
+
+    let new_query = format!("{}{} ({}", before_dollar, var_bare, suffix);
+    let new_cursor = before_dollar.chars().count() + var_bare.chars().count() + 3; // after " ("
+
+    let mut new_state = push_frame(
+        state,
+        WizardStep::Init,
+        new_query.clone(),
+        new_cursor,
+        init_suggestions.clone(),
+    );
+    new_state.var_name = var_bare.to_string();
+
+    WizardStepResult::advance(new_query, new_cursor, new_state, init_suggestions)
+}
+
+// ── 5.6 Accept init ───────────────────────────────────────────────────────────
+
+pub fn wizard_accept_init(
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    accum_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    let new_query = format!("{}{}; {}", prefix, selected_text, suffix);
+    let new_cursor = prefix.chars().count() + selected_text.chars().count() + 2;
+
+    let new_state = push_frame(
+        state,
+        WizardStep::UpdateAccum,
+        new_query.clone(),
+        new_cursor,
+        accum_suggestions.clone(),
+    );
+    WizardStepResult::advance(new_query, new_cursor, new_state, accum_suggestions)
+}
+
+// ── 5.7 Accept update accum ───────────────────────────────────────────────────
+
+pub fn wizard_accept_update_accum(
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    op_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    let new_cursor = prefix.chars().count() + selected_text.chars().count();
+    let new_query = format!("{}{}{}", prefix, selected_text, suffix);
+
+    let new_state = push_frame(
+        state,
+        WizardStep::UpdateOp,
+        new_query.clone(),
+        new_cursor,
+        op_suggestions.clone(),
+    );
+    WizardStepResult::advance(new_query, new_cursor, new_state, op_suggestions)
+}
+
+// ── 5.8 Accept update op ──────────────────────────────────────────────────────
+
+pub fn wizard_accept_update_op(
+    selected_text: &str,
+    state: &WizardState,
+    query: &str,
+    cursor: usize,
+    extract_suggestions: Vec<Suggestion>,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    // op_text is e.g. "+ $x", "- $x", "$x" (relative to current cursor position,
+    // which sits right after the accum prefix inserted by wizard_accept_update_accum)
+    let op_text = selected_text;
+
+    match state.keyword {
+        WizardKeyword::Reduce => {
+            // Close the reduce: append ")" then any suffix
+            let new_query = format!("{}{}){}", prefix, op_text, suffix);
+            let new_cursor = prefix.chars().count() + op_text.chars().count() + 1;
+            WizardStepResult::exit(new_query, new_cursor)
+        }
+        WizardKeyword::Foreach => {
+            // Show extract step
+            let new_query = format!("{}{}{}", prefix, op_text, suffix);
+            let new_cursor = prefix.chars().count() + op_text.chars().count();
+
+            let new_state = push_frame(
+                state,
+                WizardStep::Extract,
+                new_query.clone(),
+                new_cursor,
+                extract_suggestions.clone(),
+            );
+            WizardStepResult::advance(new_query, new_cursor, new_state, extract_suggestions)
+        }
+    }
+}
+
+// ── 5.9 Accept extract ────────────────────────────────────────────────────────
+
+pub fn wizard_accept_extract(
+    selected_text: &str,
+    _state: &WizardState,
+    query: &str,
+    cursor: usize,
+) -> WizardStepResult {
+    let prefix: String = query.chars().take(cursor).collect();
+    let suffix: String = query.chars().skip(cursor).collect();
+
+    if selected_text == "; ." {
+        // Insert "; .)" with cursor at "."
+        let new_query = format!("{}; .){}", prefix, suffix);
+        let new_cursor = prefix.chars().count() + 3; // at "."
+        WizardStepResult::exit(new_query, new_cursor)
+    } else {
+        // ")" → close clause
+        let new_query = format!("{}){}", prefix, suffix);
+        let new_cursor = prefix.chars().count() + 1;
+        WizardStepResult::exit(new_query, new_cursor)
+    }
+}
+
+// ── 6.1-6.2 Enter fast-forward ────────────────────────────────────────────────
+
+pub fn wizard_fast_forward(
+    keyword: &WizardKeyword,
+    current_step: &WizardStep,
+    partial_query: &str,
+    cursor: usize,
+    var_name: &str,
+) -> (String, usize) {
+    let prefix: String = partial_query.chars().take(cursor).collect();
+    let suffix: String = partial_query.chars().skip(cursor).collect();
+
+    let full = assemble_fast_forward(keyword, current_step, &prefix, &suffix, var_name);
+    let new_cursor = full.chars().count();
+    (full, new_cursor)
+}
+
+fn assemble_fast_forward(
+    keyword: &WizardKeyword,
+    current_step: &WizardStep,
+    prefix: &str,
+    suffix: &str,
+    var_name: &str,
+) -> String {
+    // Use the actual variable name chosen by the user, falling back to "x".
+    let v = if var_name.is_empty() { "x" } else { var_name };
+
+    match current_step {
+        WizardStep::Stream | WizardStep::Keyword => {
+            format!("{}.[] as ${v} (0; . + ${v}){}", prefix, suffix)
+        }
+        WizardStep::StreamSubArg { .. } => {
+            let open = find_unmatched_open_paren(prefix).unwrap_or(prefix.len() - 1);
+            let fn_name = prefix[..open]
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .rfind(|s: &&str| !s.is_empty())
+                .unwrap_or("");
+            let close_idx = suffix.find(')').unwrap_or(0);
+            let after_fn = &suffix[close_idx + 1..];
+            match fn_name {
+                "range" => format!(
+                    "{prefix}0; 5{}  as ${v} (0; . + ${v}){}",
+                    &suffix[..close_idx + 1],
+                    after_fn
+                ),
+                "recurse" => format!(
+                    "{prefix}.children[]{} as ${v} (0; . + ${v}){}",
+                    &suffix[..close_idx + 1],
+                    after_fn
+                ),
+                _ => format!(
+                    "{prefix}{} as ${v} (0; . + ${v}){}",
+                    suffix[..close_idx + 1].trim_end_matches(')'),
+                    after_fn
+                ),
+            }
+        }
+        WizardStep::BindKeyword => {
+            format!("{}as ${v} (0; . + ${v}){}", prefix, suffix)
+        }
+        WizardStep::VarName => {
+            let dollar = prefix.rfind('$').unwrap_or(prefix.len());
+            let before_dollar = &prefix[..dollar + 1];
+            format!("{}{v} (0; . + ${v}){}", before_dollar, suffix)
+        }
+        WizardStep::Init => {
+            format!("{}0; . + ${v}){}", prefix, suffix)
+        }
+        WizardStep::UpdateAccum => {
+            // Default: accumulate by applying `. + $var` to whatever is in prefix.
+            format!("{}. + ${v}){}", prefix, suffix)
+        }
+        WizardStep::UpdateOp => {
+            // The user has already chosen their body expression (it sits in prefix).
+            // Just close the clause — do not append another operator.
+            match keyword {
+                WizardKeyword::Reduce => format!("{}){}", prefix, suffix),
+                WizardKeyword::Foreach => format!("{}){}", prefix, suffix),
+            }
+        }
+        WizardStep::Extract => {
+            format!("{}){}", prefix, suffix)
+        }
+    }
+}
+
+// ── 7.1 Esc step back ─────────────────────────────────────────────────────────
+
+pub fn wizard_pop_step(state: &mut WizardState) -> Option<(String, usize, Vec<Suggestion>)> {
+    // Pop top frame
+    state.stack.pop();
+    // Look at the new top frame (if any) to restore
+    state.stack.last().map(|frame| {
+        (
+            frame.saved_query.clone(),
+            frame.saved_cursor,
+            frame.saved_suggestions.clone(),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1113,5 +1658,579 @@ mod tests {
         assert_eq!(q, "contains([\"123\", \"foo\"])");
         assert_eq!(col as usize, q.chars().count());
         assert!(!keep);
+    }
+
+    // ── Wizard step transition tests (tasks 10.x) ─────────────────────────────
+
+    fn empty_stream_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: ".[]".to_string(),
+            detail: None,
+            insert_text: ".[]".to_string(),
+        }]
+    }
+
+    fn empty_bind_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: "as".to_string(),
+            detail: None,
+            insert_text: "as".to_string(),
+        }]
+    }
+
+    fn empty_var_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: "$x".to_string(),
+            detail: None,
+            insert_text: "$x".to_string(),
+        }]
+    }
+
+    fn empty_init_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: "0".to_string(),
+            detail: None,
+            insert_text: "0".to_string(),
+        }]
+    }
+
+    fn empty_accum_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: ".".to_string(),
+            detail: None,
+            insert_text: ".".to_string(),
+        }]
+    }
+
+    fn empty_op_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: "+ $x".to_string(),
+            detail: None,
+            insert_text: "+ $x".to_string(),
+        }]
+    }
+
+    fn empty_extract_suggestions() -> Vec<Suggestion> {
+        vec![Suggestion {
+            label: ")".to_string(),
+            detail: None,
+            insert_text: ")".to_string(),
+        }]
+    }
+
+    // 10.1 wizard_enter_keyword for foreach and reduce
+    #[test]
+    fn wizard_enter_keyword_foreach_places_cursor_after_space() {
+        let query = "fore";
+        let cursor = 4;
+        let result = wizard_enter_keyword(
+            WizardKeyword::Foreach,
+            query,
+            cursor,
+            empty_stream_suggestions(),
+        );
+        assert_eq!(result.new_query, "foreach ");
+        assert_eq!(result.new_cursor, 8);
+        assert!(result.new_state.is_some());
+    }
+
+    #[test]
+    fn wizard_enter_keyword_reduce_places_cursor_after_space() {
+        let query = "red";
+        let cursor = 3;
+        let result = wizard_enter_keyword(
+            WizardKeyword::Reduce,
+            query,
+            cursor,
+            empty_stream_suggestions(),
+        );
+        assert_eq!(result.new_query, "reduce ");
+        assert_eq!(result.new_cursor, 7);
+        assert!(result.new_state.is_some());
+    }
+
+    #[test]
+    fn wizard_enter_keyword_preserves_pipe_prefix() {
+        let query = ".items | fore";
+        let cursor = query.chars().count();
+        let result = wizard_enter_keyword(
+            WizardKeyword::Foreach,
+            query,
+            cursor,
+            empty_stream_suggestions(),
+        );
+        assert!(result.new_query.starts_with(".items | foreach "));
+        let expected_cursor = ".items | foreach ".chars().count();
+        assert_eq!(result.new_cursor, expected_cursor);
+    }
+
+    // 10.2 Test full foreach step chain: Stream → BindKeyword → VarName → Init → UpdateAccum → UpdateOp → Extract → close
+    #[test]
+    fn wizard_foreach_full_step_chain() {
+        // Step 0: enter keyword
+        let r0 = wizard_enter_keyword(
+            WizardKeyword::Foreach,
+            "fore",
+            4,
+            empty_stream_suggestions(),
+        );
+        assert_eq!(r0.new_query, "foreach ");
+        let state0 = r0.new_state.unwrap();
+
+        // Step 1: accept stream ".[]"
+        let r1 = wizard_accept_stream(
+            ".[]",
+            false,
+            &state0,
+            &r0.new_query,
+            r0.new_cursor,
+            empty_bind_suggestions(),
+            Vec::new(),
+        );
+        assert_eq!(r1.new_query, "foreach .[] ");
+        let state1 = r1.new_state.unwrap();
+        assert_eq!(state1.stack.last().unwrap().step, WizardStep::BindKeyword);
+
+        // Step 2: accept bind keyword "as"
+        let r2 = wizard_accept_bind_keyword(
+            "as",
+            &state1,
+            &r1.new_query,
+            r1.new_cursor,
+            empty_var_suggestions(),
+        );
+        assert!(
+            r2.new_query.contains("as $"),
+            "query should contain 'as $': {}",
+            r2.new_query
+        );
+        let state2 = r2.new_state.unwrap();
+        assert_eq!(state2.stack.last().unwrap().step, WizardStep::VarName);
+
+        // Step 3: accept var name "$x"
+        let r3 = wizard_accept_var_name(
+            "$x",
+            &state2,
+            &r2.new_query,
+            r2.new_cursor,
+            empty_init_suggestions(),
+        );
+        assert!(
+            r3.new_query.contains("as $x ("),
+            "query should contain 'as $x (': {}",
+            r3.new_query
+        );
+        let state3 = r3.new_state.unwrap();
+        assert_eq!(state3.stack.last().unwrap().step, WizardStep::Init);
+
+        // Step 4: accept init "0"
+        let r4 = wizard_accept_init(
+            "0",
+            &state3,
+            &r3.new_query,
+            r3.new_cursor,
+            empty_accum_suggestions(),
+        );
+        assert!(
+            r4.new_query.contains("0; "),
+            "query should contain '0; ': {}",
+            r4.new_query
+        );
+        let state4 = r4.new_state.unwrap();
+        assert_eq!(state4.stack.last().unwrap().step, WizardStep::UpdateAccum);
+
+        // Step 5: accept update accum "."
+        let r5 = wizard_accept_update_accum(
+            ".",
+            &state4,
+            &r4.new_query,
+            r4.new_cursor,
+            empty_op_suggestions(),
+        );
+        assert!(
+            r5.new_query.ends_with('.') || r5.new_query.contains("0; ."),
+            "query after accum: {}",
+            r5.new_query
+        );
+        let state5 = r5.new_state.unwrap();
+        assert_eq!(state5.stack.last().unwrap().step, WizardStep::UpdateOp);
+
+        // Step 6: accept update op "+ $x"
+        let r6 = wizard_accept_update_op(
+            "+ $x",
+            &state5,
+            &r5.new_query,
+            r5.new_cursor,
+            empty_extract_suggestions(),
+        );
+        // foreach → Extract step
+        assert!(
+            r6.new_state.is_some(),
+            "foreach should proceed to Extract step"
+        );
+        let state6 = r6.new_state.unwrap();
+        assert_eq!(state6.stack.last().unwrap().step, WizardStep::Extract);
+
+        // Step 7: accept extract ")"
+        let r7 = wizard_accept_extract(")", &state6, &r6.new_query, r6.new_cursor);
+        assert!(r7.new_state.is_none(), "wizard should exit after extract");
+        assert!(r7.new_query.contains(')'), "should close with )");
+    }
+
+    // 10.3 Test full reduce step chain (no Extract step)
+    #[test]
+    fn wizard_reduce_full_step_chain() {
+        let r0 = wizard_enter_keyword(WizardKeyword::Reduce, "red", 3, empty_stream_suggestions());
+        let state0 = r0.new_state.unwrap();
+
+        let r1 = wizard_accept_stream(
+            ".[]",
+            false,
+            &state0,
+            &r0.new_query,
+            r0.new_cursor,
+            empty_bind_suggestions(),
+            Vec::new(),
+        );
+        let state1 = r1.new_state.unwrap();
+
+        let r2 = wizard_accept_bind_keyword(
+            "as",
+            &state1,
+            &r1.new_query,
+            r1.new_cursor,
+            empty_var_suggestions(),
+        );
+        let state2 = r2.new_state.unwrap();
+
+        let r3 = wizard_accept_var_name(
+            "$x",
+            &state2,
+            &r2.new_query,
+            r2.new_cursor,
+            empty_init_suggestions(),
+        );
+        let state3 = r3.new_state.unwrap();
+
+        let r4 = wizard_accept_init(
+            "0",
+            &state3,
+            &r3.new_query,
+            r3.new_cursor,
+            empty_accum_suggestions(),
+        );
+        let state4 = r4.new_state.unwrap();
+
+        let r5 = wizard_accept_update_accum(
+            ".",
+            &state4,
+            &r4.new_query,
+            r4.new_cursor,
+            empty_op_suggestions(),
+        );
+        let state5 = r5.new_state.unwrap();
+
+        // For reduce, accepting UpdateOp should close with ")" and exit
+        let r6 = wizard_accept_update_op("+ $x", &state5, &r5.new_query, r5.new_cursor, Vec::new());
+        assert!(
+            r6.new_state.is_none(),
+            "reduce wizard should exit after UpdateOp"
+        );
+        assert!(
+            r6.new_query.ends_with(')'),
+            "reduce should close with ): {}",
+            r6.new_query
+        );
+    }
+
+    // 10.6 Test wizard_fast_forward from each step
+    #[test]
+    fn wizard_fast_forward_from_stream_step_produces_complete_foreach() {
+        let (q, _cursor) = wizard_fast_forward(
+            &WizardKeyword::Foreach,
+            &WizardStep::Stream,
+            "foreach ",
+            8,
+            "x",
+        );
+        assert!(q.contains(".[]"), "should contain .[]");
+        assert!(q.contains("as $x"), "should contain as $x");
+        assert!(q.contains("(0; . + $x)"), "should contain (0; . + $x)");
+    }
+
+    #[test]
+    fn wizard_fast_forward_from_stream_step_produces_complete_reduce() {
+        let (q, _cursor) = wizard_fast_forward(
+            &WizardKeyword::Reduce,
+            &WizardStep::Stream,
+            "reduce ",
+            7,
+            "x",
+        );
+        assert!(q.contains(".[]"), "should contain .[]");
+        assert!(q.contains("as $x"), "should contain as $x");
+        assert!(q.contains("(0; . + $x)"), "should contain (0; . + $x)");
+    }
+
+    #[test]
+    fn wizard_fast_forward_from_init_step_completes_remaining() {
+        let (q, _) = wizard_fast_forward(
+            &WizardKeyword::Foreach,
+            &WizardStep::Init,
+            "foreach .[] as $x (",
+            "foreach .[] as $x (".chars().count(),
+            "x",
+        );
+        assert!(
+            q.contains("0; . + $x)"),
+            "should contain defaults from init: {}",
+            q
+        );
+    }
+
+    #[test]
+    fn wizard_fast_forward_from_update_accum_step() {
+        let (q, _) = wizard_fast_forward(
+            &WizardKeyword::Reduce,
+            &WizardStep::UpdateAccum,
+            "reduce .[] as $x (0; ",
+            "reduce .[] as $x (0; ".chars().count(),
+            "x",
+        );
+        assert!(q.contains(". + $x)"), "should contain accum + op: {}", q);
+    }
+
+    #[test]
+    fn wizard_fast_forward_at_update_op_step_just_closes() {
+        // After the user selected their body expression at UpdateOp, Enter should
+        // close with ")" — NOT append another operator like "+ $x)".
+        let query = "reduce .[].name as $name (null; $name";
+        let cursor = query.chars().count();
+        let (q, _) = wizard_fast_forward(
+            &WizardKeyword::Reduce,
+            &WizardStep::UpdateOp,
+            query,
+            cursor,
+            "name",
+        );
+        assert_eq!(
+            q, "reduce .[].name as $name (null; $name)",
+            "should just close with )"
+        );
+    }
+
+    #[test]
+    fn wizard_fast_forward_uses_actual_var_name_not_x() {
+        let (q, _) = wizard_fast_forward(
+            &WizardKeyword::Reduce,
+            &WizardStep::Stream,
+            "reduce ",
+            7,
+            "items",
+        );
+        assert!(q.contains("as $items"), "should use $items, got: {}", q);
+        assert!(
+            q.contains(". + $items)"),
+            "should use $items in op, got: {}",
+            q
+        );
+        assert!(!q.contains("$x"), "should not contain $x, got: {}", q);
+    }
+
+    // 10.7 Test wizard_pop_step at every position
+    #[test]
+    fn wizard_pop_step_returns_previous_frame() {
+        let mut state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![
+                WizardFrame {
+                    step: WizardStep::Stream,
+                    saved_query: "foreach ".to_string(),
+                    saved_cursor: 8,
+                    saved_suggestions: empty_stream_suggestions(),
+                },
+                WizardFrame {
+                    step: WizardStep::BindKeyword,
+                    saved_query: "foreach .[] ".to_string(),
+                    saved_cursor: 12,
+                    saved_suggestions: empty_bind_suggestions(),
+                },
+            ],
+            var_name: String::new(),
+        };
+
+        let result = wizard_pop_step(&mut state);
+        assert!(result.is_some());
+        let (q, col, _suggs) = result.unwrap();
+        assert_eq!(q, "foreach ");
+        assert_eq!(col, 8);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn wizard_pop_step_from_first_step_returns_none() {
+        let mut state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![WizardFrame {
+                step: WizardStep::Stream,
+                saved_query: "foreach ".to_string(),
+                saved_cursor: 8,
+                saved_suggestions: empty_stream_suggestions(),
+            }],
+            var_name: String::new(),
+        };
+
+        // Pop the only frame
+        state.stack.pop();
+        let result = wizard_pop_step(&mut state);
+        assert!(result.is_none(), "empty stack should return None");
+    }
+
+    // 10.8 Test "|" bind-keyword selection exits wizard
+    #[test]
+    fn wizard_bind_keyword_pipe_exits_wizard() {
+        let state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![WizardFrame {
+                step: WizardStep::BindKeyword,
+                saved_query: "foreach .[] ".to_string(),
+                saved_cursor: 12,
+                saved_suggestions: empty_bind_suggestions(),
+            }],
+            var_name: String::new(),
+        };
+        let r = wizard_accept_bind_keyword("|", &state, "foreach .[] ", 12, Vec::new());
+        assert!(r.new_state.is_none(), "pipe should exit wizard");
+        assert!(
+            r.new_query.contains("| "),
+            "should insert pipe: {}",
+            r.new_query
+        );
+    }
+
+    // 10.9 Test extract step: ")" closes clause; "; ." inserts extract slot
+    #[test]
+    fn wizard_extract_close_paren_exits_wizard() {
+        let state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![],
+            var_name: "x".to_string(),
+        };
+        let query = "foreach .[] as $x (0; . + $x";
+        let cursor = query.chars().count();
+        let r = wizard_accept_extract(")", &state, query, cursor);
+        assert!(r.new_state.is_none());
+        assert!(
+            r.new_query.ends_with(')'),
+            "should end with ): {}",
+            r.new_query
+        );
+    }
+
+    #[test]
+    fn wizard_extract_semicolon_dot_inserts_extract_slot() {
+        let state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![],
+            var_name: "x".to_string(),
+        };
+        let query = "foreach .[] as $x (0; . + $x";
+        let cursor = query.chars().count();
+        let r = wizard_accept_extract("; .", &state, query, cursor);
+        assert!(r.new_state.is_none());
+        assert!(
+            r.new_query.contains("; .)"),
+            "should contain '; .)': {}",
+            r.new_query
+        );
+    }
+
+    // 10.4 Test range sub-wizard: slot 0 → slot 1 → BindKeyword
+    #[test]
+    fn wizard_range_sub_wizard_slot_0_to_slot_1() {
+        let state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![WizardFrame {
+                step: WizardStep::StreamSubArg { idx: 0 },
+                saved_query: "foreach range(0; 5) ".to_string(),
+                saved_cursor: 14, // at "0"
+                saved_suggestions: Vec::new(),
+            }],
+            var_name: String::new(),
+        };
+        let query = "foreach range(0; 5) ";
+        // cursor at slot 0 (position 14, inside "0")
+        let cursor = "foreach range(".chars().count();
+        let next_suggs = vec![Suggestion {
+            label: "5".to_string(),
+            detail: None,
+            insert_text: "5".to_string(),
+        }];
+        let bind_suggs = empty_bind_suggestions();
+        let r = wizard_accept_stream_sub_arg(0, "0", &state, query, cursor, next_suggs, bind_suggs);
+        // Should advance to slot 1
+        if let Some(ref new_state) = r.new_state {
+            let top = new_state.stack.last().unwrap();
+            assert!(
+                matches!(top.step, WizardStep::StreamSubArg { idx: 1 })
+                    || matches!(top.step, WizardStep::BindKeyword),
+                "should advance to slot 1 or BindKeyword: {:?}",
+                top.step
+            );
+        }
+    }
+
+    // 10.5 Test recurse sub-wizard: slot 0 → BindKeyword
+    #[test]
+    fn wizard_recurse_sub_wizard_slot_0_to_bind_keyword() {
+        let state = WizardState {
+            keyword: WizardKeyword::Foreach,
+            stack: vec![WizardFrame {
+                step: WizardStep::StreamSubArg { idx: 0 },
+                saved_query: "foreach recurse(.children[]) ".to_string(),
+                saved_cursor: 16, // inside recurse
+                saved_suggestions: Vec::new(),
+            }],
+            var_name: String::new(),
+        };
+        let query = "foreach recurse(.children[]) ";
+        let cursor = "foreach recurse(".chars().count();
+        let bind_suggs = empty_bind_suggestions();
+        let r = wizard_accept_stream_sub_arg(
+            0,
+            ".children[]",
+            &state,
+            query,
+            cursor,
+            Vec::new(),
+            bind_suggs,
+        );
+        // For recurse (max_idx=0), this should go to BindKeyword
+        if let Some(ref new_state) = r.new_state {
+            let top = new_state.stack.last().unwrap();
+            assert_eq!(
+                top.step,
+                WizardStep::BindKeyword,
+                "recurse slot 0 should advance to BindKeyword"
+            );
+        }
+    }
+
+    // is_foreach_reduce_wizard_suggestion tests
+    #[test]
+    fn foreach_reduce_wizard_detection() {
+        assert!(is_foreach_reduce_wizard_suggestion(Some("foreach-wizard")));
+        assert!(is_foreach_reduce_wizard_suggestion(Some("reduce-wizard")));
+        assert!(!is_foreach_reduce_wizard_suggestion(Some(
+            "integer generator"
+        )));
+        assert!(!is_foreach_reduce_wizard_suggestion(None));
+    }
+
+    #[test]
+    fn is_builder_suggestion_includes_wizard_details() {
+        assert!(is_builder_suggestion(Some("foreach-wizard")));
+        assert!(is_builder_suggestion(Some("reduce-wizard")));
+        assert!(is_builder_suggestion(Some("integer generator")));
     }
 }

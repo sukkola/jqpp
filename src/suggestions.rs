@@ -26,34 +26,40 @@ pub async fn handle_finished_computes(app: &mut App<'_>, state: &mut LoopState) 
             Err(_) => {}
         }
         if state.suggestion_active {
-            app.query_input.suggestions = compute_suggestions(
-                &state.pending_qp,
-                app.executor.as_ref().map(|e| &e.json_input),
-                &state.lsp_completions,
-                state.cached_pipe_type.as_deref(),
-            );
-            app.query_input.suggestion_index = 0;
-            app.query_input.suggestion_scroll = 0;
-            let all_exact = !app.query_input.suggestions.is_empty()
-                && app
-                    .query_input
-                    .suggestions
-                    .iter()
-                    .all(|s| s.insert_text == state.pending_qp)
-                && !app
-                    .query_input
-                    .suggestions
-                    .iter()
-                    .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
-            if all_exact {
-                app.query_input.show_suggestions = false;
-                state.suggestion_active = false;
-                state.lsp_completions.clear();
-                state.cached_pipe_type = None;
+            // 9.1 Don't overwrite wizard suggestions mid-step
+            if app.wizard_state.is_some() {
+                // Wizard is active — don't let the compute path reset suggestions
+                app.structural_hint_active = false;
             } else {
-                app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                app.query_input.suggestions = compute_suggestions(
+                    &state.pending_qp,
+                    app.executor.as_ref().map(|e| &e.json_input),
+                    &state.lsp_completions,
+                    state.cached_pipe_type.as_deref(),
+                );
+                app.query_input.suggestion_index = 0;
+                app.query_input.suggestion_scroll = 0;
+                let all_exact = !app.query_input.suggestions.is_empty()
+                    && app
+                        .query_input
+                        .suggestions
+                        .iter()
+                        .all(|s| s.insert_text == state.pending_qp)
+                    && !app
+                        .query_input
+                        .suggestions
+                        .iter()
+                        .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
+                if all_exact {
+                    app.query_input.show_suggestions = false;
+                    state.suggestion_active = false;
+                    state.lsp_completions.clear();
+                    state.cached_pipe_type = None;
+                } else {
+                    app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                }
+                app.structural_hint_active = false;
             }
-            app.structural_hint_active = false;
         } else {
             let query_prefix = current_query_prefix(app);
             if !crate::hints::maybe_activate_structural_hint(app, &query_prefix) {
@@ -75,7 +81,8 @@ pub async fn run_debounced_compute(
         let query = app.query_input.textarea.lines()[0].clone();
         let cursor_col = app.query_input.textarea.cursor().1;
         let query_prefix: String = query.chars().take(cursor_col).collect();
-        let has_non_exact_suggestion = if state.suggestion_active {
+        // 9.2 Don't reset wizard suggestions in the debounce path
+        let has_non_exact_suggestion = if state.suggestion_active && app.wizard_state.is_none() {
             app.structural_hint_active = false;
             app.query_input.suggestions = compute_suggestions(
                 &query_prefix,
@@ -106,6 +113,9 @@ pub async fn run_debounced_compute(
                 app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
                 has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
             }
+        } else if state.suggestion_active {
+            // Wizard active — keep existing suggestions, hold output if needed
+            has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
         } else {
             false
         };
@@ -173,7 +183,7 @@ pub async fn run_debounced_compute(
 
         if let Some(lsp) = lsp_provider {
             let _ = lsp.did_change(&query).await;
-            if state.suggestion_active {
+            if state.suggestion_active && app.wizard_state.is_none() {
                 let _ = lsp.completion(&query).await;
             }
         }
@@ -192,7 +202,7 @@ pub fn handle_lsp_message(app: &mut App<'_>, state: &mut LoopState, msg: LspMess
             if !c.is_empty() {
                 state.lsp_completions = c;
             }
-            if state.suggestion_active {
+            if state.suggestion_active && app.wizard_state.is_none() {
                 let query_line = app.query_input.textarea.lines()[0].clone();
                 let cur = app.query_input.textarea.cursor().1;
                 let query_prefix: String = query_line.chars().take(cur).collect();
@@ -306,7 +316,29 @@ pub fn compute_suggestions(
                         Some(r.swap_remove(0))
                     }
                 })
-                .unwrap_or_else(|| input.clone());
+                .unwrap_or_else(|| {
+                    // Eval failed (e.g. incomplete foreach body like `foreach ... as $x (...; $x`).
+                    // If the head ends with a bound variable `$varname`, use the stream item
+                    // for that variable so type-filtered suggestions reflect the item type.
+                    let head_trimmed = eval_query.trim_end();
+                    if let Some(dollar_pos) = head_trimmed.rfind('$') {
+                        let var_candidate = &head_trimmed[dollar_pos + 1..];
+                        let var_name_len = var_candidate
+                            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                            .unwrap_or(var_candidate.len());
+                        let var_name = &var_candidate[..var_name_len];
+                        if !var_name.is_empty()
+                            && extract_bound_variables(query_prefix).contains(&var_name.to_string())
+                        {
+                            infer_stream_item(query_prefix, Some(input))
+                                .unwrap_or_else(|| input.clone())
+                        } else {
+                            input.clone()
+                        }
+                    } else {
+                        input.clone()
+                    }
+                });
             (Some(evaluated), tail)
         } else {
             (Some(input.clone()), query_prefix.to_string())
@@ -314,6 +346,51 @@ pub fn compute_suggestions(
     } else {
         (None, query_prefix.to_string())
     };
+
+    // ── Foreach / Reduce context: provide stream and field suggestions ────────
+    // When the cursor sits right after `foreach ` or `reduce ` (no stream
+    // expression typed yet) return stream suggestions.  When the cursor is
+    // inside an incomplete stream expression (e.g. `foreach .[].<cursor>`)
+    // show field completions for items produced by the stream so far.
+    if let Some((kw, stream_part)) = foreach_reduce_stream_expr(&eval_tail) {
+        // Detail tag used so the Tab handler can re-activate the wizard when the
+        // user is not already in wizard mode.
+        let detail_tag: &'static str = if kw == "foreach" {
+            "foreach-stream"
+        } else {
+            "reduce-stream"
+        };
+
+        if stream_part.trim().is_empty() {
+            // Cursor is right after the keyword — offer context-aware stream choices.
+            return stream_suggestions(eval_input.as_ref())
+                .into_iter()
+                .map(|s| widgets::query_input::Suggestion {
+                    // Preserve stream-sub-wizard marker; tag everything else.
+                    detail: if s.detail.as_deref() == Some("stream-sub-wizard") {
+                        s.detail
+                    } else {
+                        Some(detail_tag.to_string())
+                    },
+                    insert_text: format!("{}{} {}", prefix, kw, s.insert_text),
+                    ..s
+                })
+                .collect();
+        } else if let Some(ref input) = eval_input {
+            // Cursor is inside the stream expression — field-complete against items.
+            let field_completions = completions::json_context::get_completions(stream_part, input);
+            if !field_completions.is_empty() {
+                return field_completions
+                    .into_iter()
+                    .map(|c| widgets::query_input::Suggestion {
+                        label: c.label,
+                        detail: Some(detail_tag.to_string()),
+                        insert_text: format!("{}{} {}", prefix, kw, c.insert_text),
+                    })
+                    .collect();
+            }
+        }
+    }
 
     let json_completions = if let Some(ref input) = eval_input {
         completions::json_context::get_completions(&eval_tail, input)
@@ -397,7 +474,19 @@ pub fn compute_suggestions(
         Vec::new()
     };
 
-    let mut merged = variable_completions;
+    // Variable field completions: `$item`, `$item.`, `$item.nested.` → field paths from stream item.
+    // These are placed first so they appear before the generic bound-variable name completion.
+    let var_field_completions = variable_dot_completions(query_prefix, json_input);
+
+    let mut merged = var_field_completions;
+    for item in variable_completions {
+        if !merged
+            .iter()
+            .any(|i: &completions::CompletionItem| i.insert_text == item.insert_text)
+        {
+            merged.push(item);
+        }
+    }
     for item in json_completions {
         if !merged
             .iter()
@@ -812,6 +901,616 @@ pub fn extract_bound_variables(query_prefix: &str) -> Vec<String> {
     }
 
     out
+}
+
+// ── Wizard suggestion generators ─────────────────────────────────────────────
+
+fn make_suggestion(
+    label: &str,
+    detail: Option<&str>,
+    insert_text: &str,
+) -> widgets::query_input::Suggestion {
+    widgets::query_input::Suggestion {
+        label: label.to_string(),
+        detail: detail.map(|s| s.to_string()),
+        insert_text: insert_text.to_string(),
+    }
+}
+
+/// If `tail` (the part after the last `|`) begins with `foreach ` or `reduce `
+/// and the cursor is still inside the stream expression (no `as` yet), returns
+/// `(keyword, stream_expr_so_far)`.  Empty `stream_expr_so_far` means cursor is
+/// right after the keyword with nothing typed yet.
+fn foreach_reduce_stream_expr(tail: &str) -> Option<(&str, &str)> {
+    let t = tail.trim_start();
+    if let Some(rest) = t.strip_prefix("foreach ") {
+        if !rest.contains(" as ") {
+            return Some(("foreach", rest));
+        }
+    } else if let Some(rest) = t.strip_prefix("reduce ")
+        && !rest.contains(" as ")
+    {
+        return Some(("reduce", rest));
+    }
+    None
+}
+
+/// Returns field-path completions when the cursor sits on a bound variable
+/// (`$item`, `$item.`, `$item.nested.`) inside a `foreach`/`reduce` body.
+///
+/// Strategy:
+///  1. Find the last `$varname` at the end of the expression (after the last pipe).
+///  2. Verify the variable is bound in `query_prefix` via an `as $varname` clause.
+///  3. Use `infer_stream_item` to evaluate the actual stream item.
+///  4. Call `json_context::get_completions` on the path suffix (e.g. `.`, `.address.`)
+///     to enumerate fields of the item (or a nested value within it).
+///  5. Preserve everything before the `$` in `query_prefix`, append `$varname.field`.
+fn variable_dot_completions(
+    query_prefix: &str,
+    json_input: Option<&serde_json::Value>,
+) -> Vec<completions::CompletionItem> {
+    // Find the last `$` in the full query_prefix.
+    // Everything before it is preserved verbatim in the insert_text.
+    let dollar_abs = match query_prefix.rfind('$') {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let before_dollar = &query_prefix[..dollar_abs];
+    let after_dollar = &query_prefix[dollar_abs + 1..];
+
+    // Variable name: alphanumeric + underscore characters.
+    let var_name_len = after_dollar
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(after_dollar.len());
+    let var_name = &after_dollar[..var_name_len];
+    if var_name.is_empty() {
+        return Vec::new();
+    }
+
+    // Path suffix after the variable name (must be empty or start with `.`).
+    let var_path = &after_dollar[var_name_len..];
+    if !var_path.is_empty() && !var_path.starts_with('.') {
+        return Vec::new();
+    }
+
+    // Variable must be bound somewhere earlier in the query.
+    if !extract_bound_variables(query_prefix).contains(&var_name.to_string()) {
+        return Vec::new();
+    }
+
+    // Infer the actual stream item value.
+    let item = match infer_stream_item(query_prefix, json_input) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    // Navigate to the sub-value reached by `var_path` (minus any trailing dot).
+    let nav_path = var_path.trim_end_matches('.');
+    let target_value = if nav_path.is_empty() {
+        item
+    } else {
+        Executor::execute(nav_path, &item)
+            .ok()
+            .and_then(|mut r| r.drain(..).next())
+            .unwrap_or(item)
+    };
+
+    // Query for get_completions: use "." when var_path is empty so we get all
+    // top-level fields of the item.
+    let path_query = if var_path.is_empty() { "." } else { var_path };
+
+    completions::json_context::get_completions(path_query, &target_value)
+        .into_iter()
+        .map(|c| {
+            // c.insert_text is like ".field_name".
+            // Full insert_text: preserve everything before "$", then "$varname.field".
+            completions::CompletionItem {
+                label: c.label,
+                detail: c.detail,
+                insert_text: format!("{}${}{}", before_dollar, var_name, c.insert_text),
+            }
+        })
+        .collect()
+}
+
+/// Evaluates the stream expression in a `foreach`/`reduce` clause visible in
+/// `query_prefix` and returns the first resulting item.  Used to infer the item
+/// type for context-aware wizard suggestions.
+pub fn infer_stream_item(
+    query_prefix: &str,
+    json_input: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let input = json_input?;
+
+    // Locate the rightmost foreach/reduce keyword.
+    let (kw_start, kw_len) = {
+        let f = query_prefix
+            .rfind("foreach ")
+            .map(|p| (p, "foreach ".len()));
+        let r = query_prefix.rfind("reduce ").map(|p| (p, "reduce ".len()));
+        match (f, r) {
+            (Some(a), Some(b)) => {
+                if a.0 >= b.0 {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        }
+    };
+
+    let after_kw = &query_prefix[kw_start + kw_len..];
+
+    // Extract stream expression — everything before ` as ` (or all of after_kw if no `as` yet).
+    let stream_expr = if let Some(as_pos) = after_kw.find(" as ") {
+        &after_kw[..as_pos]
+    } else {
+        after_kw
+    }
+    .trim();
+
+    if stream_expr.is_empty() {
+        return None;
+    }
+
+    // The pipe prefix is everything before the keyword, minus trailing `|` / whitespace.
+    let before_kw =
+        query_prefix[..kw_start].trim_end_matches(|c: char| c == '|' || c.is_whitespace());
+
+    let full_expr = if before_kw.is_empty() {
+        stream_expr.to_string()
+    } else {
+        format!("{} | {}", before_kw, stream_expr)
+    };
+
+    Executor::execute(&full_expr, input)
+        .ok()
+        .and_then(|mut r| r.drain(..).next())
+}
+
+/// Returns context-aware stream expression suggestions based on the actual
+/// JSON value being piped into `foreach`/`reduce`.  All suggestions are derived
+/// from the real data — no static examples with made-up field names.
+pub fn stream_suggestions(
+    pipe_input: Option<&serde_json::Value>,
+) -> Vec<widgets::query_input::Suggestion> {
+    use serde_json::Value;
+
+    // items: (priority, label, detail, insert_text)
+    let mut items: Vec<(i32, String, Option<&'static str>, String)> = Vec::new();
+
+    match pipe_input {
+        None => {
+            // No input available — generic safe fallback.
+            items.push((10, ".[]".into(), None, ".[]".into()));
+            items.push((7, ".".into(), None, ".".into()));
+            items.push((6, "to_entries[]".into(), None, "to_entries[]".into()));
+            items.push((
+                5,
+                "range(0; 5)".into(),
+                Some("stream-sub-wizard"),
+                "range(0; 5)".into(),
+            ));
+        }
+
+        Some(Value::Array(arr)) => {
+            items.push((10, ".[]".into(), None, ".[]".into()));
+
+            match arr.first() {
+                Some(Value::Object(map)) => {
+                    // Show per-field paths derived from the actual item.
+                    for (rank, key) in map.keys().enumerate().take(5) {
+                        let path = format!(".[].{key}");
+                        items.push((9 - rank as i32, path.clone(), None, path));
+                    }
+                    // Multi-stream for fields that are themselves arrays.
+                    let arr_keys: Vec<&str> = map
+                        .iter()
+                        .filter(|(_, v)| matches!(v, Value::Array(_)))
+                        .map(|(k, _)| k.as_str())
+                        .take(2)
+                        .collect();
+                    if arr_keys.len() >= 2 {
+                        let ms = format!("(.{}[], .{}[])", arr_keys[0], arr_keys[1]);
+                        items.push((3, ms.clone(), None, ms));
+                    }
+                    // Recurse only when the item has an array-valued field.
+                    if let Some((k, _)) = map.iter().find(|(_, v)| matches!(v, Value::Array(_))) {
+                        let r = format!("recurse(.{k}[])");
+                        items.push((2, r.clone(), Some("stream-sub-wizard"), r));
+                    }
+                    items.push((1, "paths(scalars)".into(), None, "paths(scalars)".into()));
+                }
+                Some(Value::Number(_)) => {
+                    items.push((
+                        5,
+                        ".[] | select(. > 0)".into(),
+                        None,
+                        ".[] | select(. > 0)".into(),
+                    ));
+                    items.push((1, "paths(scalars)".into(), None, "paths(scalars)".into()));
+                }
+                Some(Value::Array(_)) => {
+                    // Array of arrays — iterate and flatten.
+                    items.push((5, ".[][]".into(), None, ".[][]".into()));
+                }
+                _ => {
+                    items.push((1, "paths(scalars)".into(), None, "paths(scalars)".into()));
+                }
+            }
+        }
+
+        Some(Value::Object(map)) => {
+            items.push((10, "to_entries[]".into(), None, "to_entries[]".into()));
+            items.push((8, ".[]".into(), None, ".[]".into()));
+            items.push((7, "keys[]".into(), None, "keys[]".into()));
+
+            // Multi-stream for array-valued keys.
+            let arr_keys: Vec<&str> = map
+                .iter()
+                .filter(|(_, v)| matches!(v, Value::Array(_)))
+                .map(|(k, _)| k.as_str())
+                .take(2)
+                .collect();
+            match arr_keys.len() {
+                n if n >= 2 => {
+                    let ms = format!("(.{}[], .{}[])", arr_keys[0], arr_keys[1]);
+                    items.push((6, ms.clone(), None, ms));
+                }
+                1 => {
+                    let ms = format!(".{}[]", arr_keys[0]);
+                    items.push((6, ms.clone(), None, ms));
+                }
+                _ => {}
+            }
+            items.push((3, "paths(scalars)".into(), None, "paths(scalars)".into()));
+        }
+
+        Some(Value::Number(_)) => {
+            items.push((
+                10,
+                "range(0; 5)".into(),
+                Some("stream-sub-wizard"),
+                "range(0; 5)".into(),
+            ));
+            items.push((8, ".".into(), None, ".".into()));
+        }
+
+        Some(Value::String(_)) => {
+            items.push((10, "split(\"\")[]".into(), None, "split(\"\")[]".into()));
+            items.push((8, "explode[]".into(), None, "explode[]".into()));
+            items.push((6, ".".into(), None, ".".into()));
+        }
+
+        Some(_) => {
+            items.push((10, ".".into(), None, ".".into()));
+            items.push((
+                8,
+                "range(0; 5)".into(),
+                Some("stream-sub-wizard"),
+                "range(0; 5)".into(),
+            ));
+        }
+    }
+
+    items.sort_by_key(|item| std::cmp::Reverse(item.0));
+    items
+        .into_iter()
+        .map(|(_, label, detail, insert_text)| make_suggestion(&label, detail, &insert_text))
+        .collect()
+}
+
+pub fn bind_keyword_suggestions() -> Vec<widgets::query_input::Suggestion> {
+    vec![
+        make_suggestion("as", None, "as"),
+        make_suggestion("|", None, "|"),
+    ]
+}
+
+pub fn varname_suggestions(query_prefix: &str) -> Vec<widgets::query_input::Suggestion> {
+    let mut names: Vec<String> = extract_bound_variables(query_prefix)
+        .into_iter()
+        .map(|n| format!("${}", n))
+        .collect();
+
+    for default in &["$x", "$item", "$acc"] {
+        if !names.iter().any(|n| n.as_str() == *default) {
+            names.push(default.to_string());
+        }
+    }
+
+    names
+        .into_iter()
+        .map(|name| make_suggestion(&name, None, &name))
+        .collect()
+}
+
+pub fn init_suggestions(input_type: Option<&str>) -> Vec<widgets::query_input::Suggestion> {
+    let is_object = matches!(input_type, Some("object"));
+
+    let ordered: &[&str] = if is_object {
+        &["{}", "null", "0", "[]"]
+    } else {
+        &["0", "null", "[]", "{}"]
+    };
+
+    ordered
+        .iter()
+        .map(|v| make_suggestion(v, None, v))
+        .collect()
+}
+
+pub fn update_accum_suggestions(var_name: &str) -> Vec<widgets::query_input::Suggestion> {
+    // The accumulator expression is almost always `.` (the running accumulator).
+    // `$var` (replace) is the second choice.  No root-input fields here — they
+    // are not relevant to the accumulator; item fields belong in update_op_suggestions.
+    vec![
+        make_suggestion(".", None, "."),
+        make_suggestion(&format!("${}", var_name), None, &format!("${}", var_name)),
+    ]
+}
+
+/// Returns operator+operand suggestions tuned to the type of the stream item.
+/// `item_type` should be the jq type string of a typical item ("object",
+/// "array", "number", "string", …).  `None` falls back to numeric defaults.
+pub fn update_op_suggestions(
+    var_name: &str,
+    item_type: Option<&str>,
+) -> Vec<widgets::query_input::Suggestion> {
+    match item_type {
+        Some("object") => vec![
+            // Merge / overlay — most useful for object items.
+            make_suggestion(&format!("+ ${var_name}"), None, &format!("+ ${var_name}")),
+            // Recursive merge.
+            make_suggestion(&format!("* ${var_name}"), None, &format!("* ${var_name}")),
+            // Replace accumulator with the item.
+            make_suggestion(
+                &format!("${var_name}"),
+                Some("replace"),
+                &format!("${var_name}"),
+            ),
+        ],
+        Some("array") => vec![
+            // Append item to accumulator array.
+            make_suggestion(
+                &format!("+ [${var_name}]"),
+                None,
+                &format!("+ [${var_name}]"),
+            ),
+            // Concat arrays (when item is itself an array).
+            make_suggestion(&format!("+ ${var_name}"), None, &format!("+ ${var_name}")),
+            // Replace accumulator.
+            make_suggestion(
+                &format!("${var_name}"),
+                Some("replace"),
+                &format!("${var_name}"),
+            ),
+        ],
+        Some("string") => vec![
+            make_suggestion(&format!("+ ${var_name}"), None, &format!("+ ${var_name}")),
+            make_suggestion(
+                &format!("${var_name}"),
+                Some("replace"),
+                &format!("${var_name}"),
+            ),
+        ],
+        _ => vec![
+            // number or unknown → arithmetic defaults
+            make_suggestion(&format!("+ ${var_name}"), None, &format!("+ ${var_name}")),
+            make_suggestion(&format!("- ${var_name}"), None, &format!("- ${var_name}")),
+            make_suggestion(&format!("* ${var_name}"), None, &format!("* ${var_name}")),
+            make_suggestion("+ 1", None, "+ 1"),
+            make_suggestion("- 1", None, "- 1"),
+            make_suggestion(
+                &format!("${var_name}"),
+                Some("replace"),
+                &format!("${var_name}"),
+            ),
+        ],
+    }
+}
+
+pub fn extract_suggestions() -> Vec<widgets::query_input::Suggestion> {
+    vec![
+        make_suggestion(")", None, ")"),
+        make_suggestion("; .", None, "; ."),
+    ]
+}
+
+pub fn sub_wizard_start_suggestions(fn_name: &str) -> Vec<widgets::query_input::Suggestion> {
+    match fn_name {
+        "range" => vec![
+            make_suggestion("0", None, "0"),
+            make_suggestion("1", None, "1"),
+        ],
+        "recurse" => vec![
+            make_suggestion(".children[]", None, ".children[]"),
+            make_suggestion(".[]", None, ".[]"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+pub fn sub_wizard_range_end_suggestions() -> Vec<widgets::query_input::Suggestion> {
+    vec![
+        make_suggestion("5", None, "5"),
+        make_suggestion("10", None, "10"),
+        make_suggestion("100", None, "100"),
+    ]
+}
+
+// ── Wizard suggestion tests (tasks 11.x) ─────────────────────────────────────
+
+#[cfg(test)]
+mod wizard_tests {
+    use super::*;
+
+    // 11.1 stream_suggestions for array input: .[] is first
+    #[test]
+    fn stream_suggestions_array_input_dot_brackets_first() {
+        let input = serde_json::json!([{"id": 1}]);
+        let suggs = stream_suggestions(Some(&input));
+        assert!(!suggs.is_empty());
+        assert_eq!(suggs[0].label, ".[]");
+    }
+
+    // 11.1b stream_suggestions for array of objects: item field paths included
+    #[test]
+    fn stream_suggestions_array_of_objects_includes_field_paths() {
+        let input = serde_json::json!([{"order_id": "001", "amount": 9.99}]);
+        let suggs = stream_suggestions(Some(&input));
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&".[].order_id"),
+            "should include .[].order_id: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&".[].amount"),
+            "should include .[].amount: {:?}",
+            labels
+        );
+        // No made-up field names
+        assert!(
+            !labels
+                .iter()
+                .any(|l| l.contains(".a[]") || l.contains(".b[]")),
+            "should not suggest made-up fields: {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"inputs"),
+            "should not suggest 'inputs': {:?}",
+            labels
+        );
+    }
+
+    // 11.2 stream_suggestions for object input: to_entries[] ranks higher than .[]
+    #[test]
+    fn stream_suggestions_object_input_to_entries_before_dot_brackets() {
+        let input = serde_json::json!({"key": "value"});
+        let suggs = stream_suggestions(Some(&input));
+        let to_entries_pos = suggs
+            .iter()
+            .position(|s| s.label == "to_entries[]")
+            .unwrap();
+        let dot_brackets_pos = suggs.iter().position(|s| s.label == ".[]").unwrap();
+        assert!(
+            to_entries_pos < dot_brackets_pos,
+            "to_entries[] should rank higher than .[] for object input"
+        );
+    }
+
+    // 11.3 varname_suggestions with no bound vars: defaults returned
+    #[test]
+    fn varname_suggestions_no_bound_vars_returns_defaults() {
+        let suggs = varname_suggestions("");
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"$x"), "should contain $x");
+        assert!(labels.contains(&"$item"), "should contain $item");
+        assert!(labels.contains(&"$acc"), "should contain $acc");
+    }
+
+    // 11.4 varname_suggestions with outer bound vars: bound names appear
+    #[test]
+    fn varname_suggestions_with_bound_vars_includes_them() {
+        let query_prefix = ".[] as $row | ";
+        let suggs = varname_suggestions(query_prefix);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"$row"), "should contain $row");
+    }
+
+    // 11.5 init_suggestions for object input: {} is first
+    #[test]
+    fn init_suggestions_object_input_empty_object_first() {
+        let suggs = init_suggestions(Some("object"));
+        assert_eq!(suggs[0].label, "{}");
+    }
+
+    // 11.6 init_suggestions for array/other input: 0 is first
+    #[test]
+    fn init_suggestions_array_input_zero_first() {
+        let suggs = init_suggestions(Some("array"));
+        assert_eq!(suggs[0].label, "0");
+    }
+
+    #[test]
+    fn init_suggestions_null_input_zero_first() {
+        let suggs = init_suggestions(None);
+        assert_eq!(suggs[0].label, "0");
+    }
+
+    // 11.7 update_op_suggestions: arithmetic defaults for unknown/number type
+    #[test]
+    fn update_op_suggestions_includes_replace_and_arithmetic() {
+        let suggs = update_op_suggestions("x", None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| *l == "$x"),
+            "should include $x (replace)"
+        );
+        assert!(labels.iter().any(|l| *l == "+ $x"), "should include + $x");
+        assert!(labels.iter().any(|l| *l == "- $x"), "should include - $x");
+        assert!(labels.iter().any(|l| *l == "* $x"), "should include * $x");
+    }
+
+    #[test]
+    fn update_op_suggestions_object_type_offers_merge_not_arithmetic() {
+        let suggs = update_op_suggestions("item", Some("object"));
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| *l == "+ $item"),
+            "should include merge"
+        );
+        assert!(
+            labels.iter().any(|l| *l == "* $item"),
+            "should include deep-merge"
+        );
+        // No arithmetic subtract for objects
+        assert!(
+            !labels.iter().any(|l| *l == "- $item"),
+            "should NOT include - $item for objects"
+        );
+    }
+
+    #[test]
+    fn update_op_suggestions_array_type_offers_append() {
+        let suggs = update_op_suggestions("x", Some("array"));
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| *l == "+ [$x]"),
+            "should include array append"
+        );
+    }
+
+    // stream-sub-wizard flag: range(0;5) flagged in the fallback (no input) case
+    #[test]
+    fn stream_suggestions_range_flagged_as_sub_wizard_no_input() {
+        let suggs = stream_suggestions(None);
+        let range = suggs.iter().find(|s| s.label == "range(0; 5)").unwrap();
+        assert_eq!(range.detail.as_deref(), Some("stream-sub-wizard"));
+    }
+
+    // recurse suggestion is generated from actual item data (array-valued field)
+    #[test]
+    fn stream_suggestions_recurse_uses_real_field_name() {
+        let input = serde_json::json!([{"id": 1, "children": [{"id": 2, "children": []}]}]);
+        let suggs = stream_suggestions(Some(&input));
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        // Should suggest recurse(.children[]) because items have a "children" array field
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("recurse") && l.contains("children")),
+            "should suggest recurse with real field name: {:?}",
+            labels
+        );
+        let recurse_sugg = suggs.iter().find(|s| s.label.contains("recurse")).unwrap();
+        assert_eq!(recurse_sugg.detail.as_deref(), Some("stream-sub-wizard"));
+    }
 }
 
 #[cfg(test)]
@@ -1704,5 +2403,86 @@ mod tests {
 
         let ctx = completions::json_context::string_param_context(&query_prefix, None).unwrap();
         assert_eq!(ctx.inner_prefix, "Alic");
+    }
+
+    // ── variable_dot_completions insert_text correctness ─────────────────────
+
+    #[test]
+    fn variable_dot_completions_preserves_full_foreach_body_prefix() {
+        // Scenario: .orders|foreach .[].customer as $item ({}; $item
+        // Selecting "customer_name" should produce the full context, not just ".orders|$item.customer_name"
+        let input = serde_json::json!({
+            "orders": [{"customer": {"customer_name": "Alice", "customer_id": 1}}]
+        });
+        let query_prefix = ".orders|foreach .[].customer as $item ({}; $item";
+        let completions = variable_dot_completions(query_prefix, Some(&input));
+        assert!(
+            !completions.is_empty(),
+            "expected field completions for $item"
+        );
+        let customer_name = completions
+            .iter()
+            .find(|c| c.label == "customer_name")
+            .expect("expected customer_name completion");
+        // The insert_text must preserve the full foreach body prefix
+        assert_eq!(
+            customer_name.insert_text,
+            ".orders|foreach .[].customer as $item ({}; $item.customer_name"
+        );
+    }
+
+    #[test]
+    fn variable_dot_completions_preserves_prefix_with_trailing_dot() {
+        // Scenario: .orders|foreach .[].customer as $item ({}; $item.
+        let input = serde_json::json!({
+            "orders": [{"customer": {"customer_name": "Alice", "customer_id": 1}}]
+        });
+        let query_prefix = ".orders|foreach .[].customer as $item ({}; $item.";
+        let completions = variable_dot_completions(query_prefix, Some(&input));
+        let customer_name = completions
+            .iter()
+            .find(|c| c.label == "customer_name")
+            .expect("expected customer_name completion");
+        assert_eq!(
+            customer_name.insert_text,
+            ".orders|foreach .[].customer as $item ({}; $item.customer_name"
+        );
+    }
+
+    #[test]
+    fn variable_dot_completions_empty_when_no_bound_var() {
+        // $x is not bound — should return nothing
+        let input = serde_json::json!({"foo": 1});
+        let query_prefix = ".foo | $x";
+        let completions = variable_dot_completions(query_prefix, Some(&input));
+        assert!(completions.is_empty());
+    }
+
+    // ── $varname | <cursor> uses stream item type for suggestions ─────────────
+
+    #[test]
+    fn compute_suggestions_after_bound_var_pipe_uses_stream_item_type() {
+        // .orders|foreach .[].order_id as $x (null; .;$x |<cursor>)
+        // order_id is a string — suggestions should include string builtins like
+        // `ascii_downcase`, `ltrimstr`, `startswith` etc., not object builtins.
+        let input = serde_json::json!({
+            "orders": [{"order_id": "ORD-001", "amount": 100}]
+        });
+        // query_prefix ends after `$x |` — cursor is there
+        let qp = ".orders|foreach .[].order_id as $x (null; .;$x |";
+        let suggs = compute_suggestions(qp, Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        // string builtins should be present
+        assert!(
+            labels.contains(&"ascii_downcase"),
+            "expected ascii_downcase in suggestions, got: {:?}",
+            &labels[..labels.len().min(20)]
+        );
+        // object-only builtins should not be present
+        assert!(
+            !labels.contains(&"to_entries"),
+            "to_entries should not appear for string context, got: {:?}",
+            &labels[..labels.len().min(20)]
+        );
     }
 }

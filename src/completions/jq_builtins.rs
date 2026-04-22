@@ -242,12 +242,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         InputType::Array,
     ),
     ("range", "range()", "integer generator", InputType::Any),
-    (
-        "reduce",
-        "reduce .[] as $x (0; . + $x)",
-        "fold / accumulate",
-        InputType::Any,
-    ),
+    ("reduce", "reduce", "reduce-wizard", InputType::Any),
     (
         "flatten",
         "flatten(1)",
@@ -510,18 +505,8 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
         "from..to step integer generator",
         InputType::Any,
     ),
-    (
-        "reduce",
-        "reduce .[] as $x (0; . + $x)",
-        "fold / accumulate",
-        InputType::Any,
-    ),
-    (
-        "foreach",
-        "foreach .[] as $x (0; . + $x)",
-        "stateful iteration",
-        InputType::Any,
-    ),
+    ("reduce", "reduce", "reduce-wizard", InputType::Any),
+    ("foreach", "foreach", "foreach-wizard", InputType::Any),
     (
         "until",
         "until(. > 10; . + 1)",
