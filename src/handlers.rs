@@ -1,13 +1,15 @@
 use crate::accept::{
-    apply_contains_builder_suggestion, apply_numeric_builder_suggestion, apply_selected_suggestion,
+    apply_contains_builder_suggestion, apply_numeric_builder_suggestion,
+    apply_select_condition_suggestion, apply_selected_suggestion,
     commit_current_string_param_input, cursor_col_after_accept,
     expand_string_param_prefix_with_tab, finalize_contains_builder_on_escape,
     finalize_numeric_builder_on_escape, is_contains_builder_suggestion,
     is_foreach_reduce_wizard_suggestion, is_numeric_builder_suggestion,
-    is_string_param_value_suggestion, starts_context_aware_function_call,
-    wizard_accept_bind_keyword, wizard_accept_extract, wizard_accept_init, wizard_accept_stream,
-    wizard_accept_stream_sub_arg, wizard_accept_update_accum, wizard_accept_update_op,
-    wizard_accept_var_name, wizard_enter_keyword, wizard_fast_forward, wizard_pop_step,
+    is_select_condition_suggestion, is_string_param_value_suggestion,
+    starts_context_aware_function_call, wizard_accept_bind_keyword, wizard_accept_extract,
+    wizard_accept_init, wizard_accept_stream, wizard_accept_stream_sub_arg,
+    wizard_accept_update_accum, wizard_accept_update_op, wizard_accept_var_name,
+    wizard_enter_keyword, wizard_fast_forward, wizard_pop_step,
 };
 use crate::hints::{
     clear_dismissed_hint_if_query_changed, dismiss_structural_hint, maybe_activate_structural_hint,
@@ -240,6 +242,13 @@ pub fn handle_query_input_key(
                         &full,
                         cur,
                         true,
+                    )
+                } else if is_select_condition_suggestion(selected.detail.as_deref()) {
+                    apply_select_condition_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
                     )
                 } else {
                     let (t, c) = apply_selected_suggestion(
@@ -558,6 +567,13 @@ pub fn handle_query_input_key(
                         &full,
                         cur,
                         false,
+                    )
+                } else if is_select_condition_suggestion(selected.detail.as_deref()) {
+                    apply_select_condition_suggestion(
+                        &suggestion,
+                        selected.detail.as_deref(),
+                        &full,
+                        cur,
                     )
                 } else {
                     let (t, c) = apply_selected_suggestion(
@@ -1327,6 +1343,78 @@ mod tests {
         assert!(!state.suggestion_active);
         let q = &app.query_input.textarea.lines()[0];
         assert!(Executor::execute_query(q, &json!({"orders":[{"order_id":"ORD-001"}]})).is_ok());
+    }
+
+    #[test]
+    fn esc_on_contains_nested_object_closes_all_brace_levels() {
+        // Cursor inside a two-level nested contains object:
+        // `.orders|contains({customer: {customer_name: "Mikko Virtanen"`
+        // Esc should close BOTH the inner `{` and the outer `{`, producing:
+        // `.orders|contains({customer: {customer_name: "Mikko Virtanen"}})`
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        let query = r#".orders|contains({customer: {customer_name: "Mikko Virtanen""#.to_string();
+        let cursor = query.chars().count();
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![query]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor as u16));
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "Mikko Virtanen".to_string(),
+            detail: Some("contains object value".to_string()),
+            insert_text: r#".orders|contains({customer: {customer_name: "Mikko Virtanen""#
+                .to_string(),
+        }];
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            r#".orders|contains({customer: {customer_name: "Mikko Virtanen"}})"#,
+            "Esc should close both nested brace levels"
+        );
+        assert!(!app.query_input.show_suggestions);
+    }
+
+    #[test]
+    fn esc_on_contains_single_level_object_still_closes_one_brace() {
+        // Single-level: `contains({status: "shipped"` → `contains({status: "shipped"})`
+        let mut app = App::new();
+        let mut state = LoopState::new();
+        let keymap = Keymap::default();
+
+        let query = r#"contains({status: "shipped""#.to_string();
+        let cursor = query.chars().count();
+        app.query_input.textarea = tui_textarea::TextArea::from(vec![query]);
+        app.query_input
+            .textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(0, cursor as u16));
+        app.query_input.show_suggestions = true;
+        state.suggestion_active = true;
+        app.query_input.suggestions = vec![widgets::query_input::Suggestion {
+            label: "shipped".to_string(),
+            detail: Some("contains object value".to_string()),
+            insert_text: r#"contains({status: "shipped""#.to_string(),
+        }];
+
+        let esc_key = KeyEvent::new(
+            KeyCode::Esc,
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        );
+        handle_query_input_key(&mut app, &mut state, esc_key, &keymap);
+
+        assert_eq!(
+            app.query_input.textarea.lines()[0],
+            r#"contains({status: "shipped"})"#
+        );
     }
 
     #[test]

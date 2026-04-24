@@ -302,6 +302,36 @@ pub fn compute_suggestions(
             .collect();
     }
 
+    // ── select() condition intellisense ──────────────────────────────────────
+    // When the cursor is inside `select(`, always return early:
+    // - Path phase: return context-appropriate path starters (`.`, `.field`, `length`, …)
+    // - Operator phase: return comparison operators (`> `, `== `, …)
+    // - Value phase: return empty — user is typing a literal value. This prevents
+    //   unrelated builtins from appearing and replacing the whole select clause.
+    if let Some(sel_ctx) = completions::json_context::select_condition_context(query_prefix) {
+        let flowing_value: Option<serde_json::Value> = json_input.map(|input| {
+            Executor::execute(sel_ctx.context_path, input)
+                .ok()
+                .and_then(|mut r| r.pop())
+                .unwrap_or_else(|| input.clone())
+        });
+
+        let starters: Vec<completions::CompletionItem> =
+            completions::json_context::generate_select_starters(
+                flowing_value.as_ref().unwrap_or(&serde_json::Value::Null),
+                sel_ctx.inner_prefix,
+            );
+
+        return starters
+            .into_iter()
+            .map(|i| widgets::query_input::Suggestion {
+                label: i.label,
+                detail: i.detail,
+                insert_text: i.insert_text,
+            })
+            .collect();
+    }
+
     let token = current_token(query_prefix);
     let fuzzy_token = fuzzy_token_fragment(token);
     let prefix = crate::suggestions::lsp_pipe_prefix(query_prefix);
@@ -2493,5 +2523,145 @@ mod tests {
             "to_entries should not appear for string context, got: {:?}",
             &labels[..labels.len().min(20)]
         );
+    }
+
+    // ── select() condition intellisense ──────────────────────────────────────
+
+    #[test]
+    fn select_condition_number_stream_path_phase() {
+        // .[] | select( with number array → path phase shows "." selector
+        let input = serde_json::json!([27.64, 53.06, 35.32]);
+        let suggs = compute_suggestions(".[] | select(", Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"."),
+            "expected '.' path selector, got: {:?}",
+            labels
+        );
+        // Operators should NOT appear in path phase
+        assert!(
+            !labels.contains(&"> "),
+            "should not show '> ' in path phase, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_condition_number_stream_operator_phase() {
+        // After accepting "." → inner_prefix is ". " → operator phase
+        let input = serde_json::json!([27.64, 53.06, 35.32]);
+        let suggs = compute_suggestions(".[] | select(. ", Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"> "),
+            "expected '> ' operator, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"< "),
+            "expected '< ' operator, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"== "),
+            "expected '== ' operator, got: {:?}",
+            labels
+        );
+        // insert_text includes path prefix
+        let gt = suggs.iter().find(|s| s.label == "> ").unwrap();
+        assert_eq!(gt.insert_text, ". > ");
+    }
+
+    #[test]
+    fn select_condition_object_stream_path_phase_uses_keys() {
+        let input = serde_json::json!([{"name": "Alice", "age": 30}, {"name": "Bob", "age": 17}]);
+        let suggs = compute_suggestions(".[] | select(", Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&".age"),
+            "expected '.age' selector, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&".name"),
+            "expected '.name' selector, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_condition_string_array_element_path_phase() {
+        // .[] | select( with string array → element is string → string path starters
+        let input = serde_json::json!(["apple", "banana", "pear"]);
+        let suggs = compute_suggestions(".[] | select(", Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"startswith("),
+            "expected 'startswith(' in suggestions, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' in suggestions, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_condition_insert_text_is_condition_only() {
+        // insert_text should NOT contain "select(" — that's the apply function's job
+        let input = serde_json::json!([1, 2, 3]);
+        let suggs = compute_suggestions(".[] | select(", Some(&input), &[], None);
+        for s in &suggs {
+            assert!(
+                !s.insert_text.contains("select("),
+                "insert_text should not contain 'select(': {}",
+                s.insert_text
+            );
+        }
+    }
+
+    #[test]
+    fn select_condition_bare_array_input_shows_array_level_starters() {
+        // select( with bare array input → array-level starters, NOT element starters
+        let input = serde_json::json!(["delta", "india", "foxtrot"]);
+        let suggs = compute_suggestions("select(", Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        // Should show array-level starters, not string element starters
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' for array input, got: {:?}",
+            labels
+        );
+        // Should NOT show startswith( — that's for string elements, not the array
+        assert!(
+            !labels.contains(&"startswith("),
+            "should not show 'startswith(' for array input (needs .[] first), got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_condition_evaluation_failure_falls_back() {
+        // Object input with bare select( → falls back to object path starters
+        let input = serde_json::json!({"x": 1});
+        let suggs = compute_suggestions("select(", Some(&input), &[], None);
+        assert!(!suggs.is_empty(), "expected fallback starters, got empty");
+    }
+
+    #[test]
+    fn select_condition_prevents_general_completions_from_leaking() {
+        // General completions (like builtins) must NOT appear inside select()
+        let input = serde_json::json!([1, 2, 3]);
+        let suggs = compute_suggestions(".[] | select(", Some(&input), &[], None);
+        // No builtin like "length" with detail None, "ascii_downcase", etc.
+        for s in &suggs {
+            assert!(
+                s.detail.as_deref() == Some("select path")
+                    || s.detail.as_deref() == Some("select op"),
+                "unexpected non-select suggestion leaked: {:?}",
+                s
+            );
+        }
     }
 }

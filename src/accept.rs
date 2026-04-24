@@ -87,6 +87,7 @@ pub fn is_field_path_function_call_start(suggestion: &str) -> bool {
             | "del"
             | "path"
             | "has"
+            | "select"
             | "flatten" // "range" intentionally omitted: json_context returns no live completions for
                         // range arguments, so keeping keep_active=true only causes stale suggestions to
                         // stay visible and lets them overwrite the accepted form.
@@ -371,6 +372,37 @@ pub fn finalize_numeric_builder_on_escape(
     Some((full_query.to_string(), (open + close + 1) as u16))
 }
 
+/// Count the number of `{` that have no matching `}` in `s`, ignoring braces
+/// inside JSON string literals (i.e. between unescaped `"` pairs).
+fn unclosed_brace_depth(s: &str) -> usize {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    for ch in s.chars() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+    }
+    depth as usize
+}
+
 pub fn finalize_contains_builder_on_escape(
     full_query: &str,
     cursor_col: usize,
@@ -402,11 +434,25 @@ pub fn finalize_contains_builder_on_escape(
                 inner = "{".to_string();
             }
         }
-        if !inner.ends_with('}') {
+        // Close every unclosed `{` — handles nested objects of any depth.
+        let unclosed = unclosed_brace_depth(&inner);
+        for _ in 0..unclosed {
             inner.push('}');
         }
+        if unclosed == 0 {
+            // Already balanced — nothing to add.
+        }
     } else if inner.starts_with('[') {
-        if !inner.ends_with(']') {
+        if inner.contains('{') {
+            // Array-of-objects form `[{...}]` — close any unclosed `{` first, then `]`.
+            let unclosed = unclosed_brace_depth(&inner);
+            for _ in 0..unclosed {
+                inner.push('}');
+            }
+            if !inner.ends_with(']') {
+                inner.push(']');
+            }
+        } else if !inner.ends_with(']') {
             inner.push(']');
         }
     } else {
@@ -494,6 +540,67 @@ pub fn commit_current_string_param_input(
         .unwrap_or_default();
     let new_query = format!("{}{}", committed, tail);
     Some((new_query, committed.chars().count() as u16))
+}
+
+pub fn is_select_condition_suggestion(detail: Option<&str>) -> bool {
+    matches!(detail, Some("select path") | Some("select op"))
+}
+
+/// Find the closing `)` of the select call in `suffix` (which starts from inside
+/// the select argument). Returns a slice starting at that `)`, or "" if not found.
+fn find_select_close(suffix: &str) -> &str {
+    let mut depth = 0i32;
+    for (i, ch) in suffix.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return &suffix[i..];
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    ""
+}
+
+/// Apply a select condition suggestion. Unlike `apply_selected_suggestion`, this:
+/// 1. Finds the `select(` open-paren in the query prefix
+/// 2. Replaces everything inside `select(…)` with `insert_text`
+/// 3. Preserves the closing `)` and anything after it
+/// 4. Returns keep_active=true for "select path" (so operator phase fires),
+///    false for "select op" (user types a value next)
+pub fn apply_select_condition_suggestion(
+    insert_text: &str,
+    detail: Option<&str>,
+    full_query: &str,
+    cursor_col: usize,
+) -> (String, u16, bool) {
+    let query_prefix: String = full_query.chars().take(cursor_col).collect();
+    let suffix: String = full_query.chars().skip(cursor_col).collect();
+
+    let open = match find_unmatched_open_paren(&query_prefix) {
+        Some(i) => i,
+        None => {
+            // Fallback: just append
+            let col = insert_text.chars().count() as u16;
+            return (format!("{}{}", insert_text, suffix), col, false);
+        }
+    };
+
+    // Everything up to and including "select("
+    let select_prefix = &query_prefix[..open + 1];
+
+    // Find the matching ")" in the suffix and take everything from it onward
+    let tail = find_select_close(&suffix);
+
+    let new_query = format!("{}{}{}", select_prefix, insert_text, tail);
+    // Cursor placed right after insert_text (before the closing ")")
+    let col = (open + 1 + insert_text.chars().count()) as u16;
+
+    let keep_active = detail == Some("select path");
+    (new_query, col, keep_active)
 }
 
 pub fn longest_common_prefix(values: &[String]) -> String {
