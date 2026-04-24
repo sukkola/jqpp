@@ -263,6 +263,7 @@ pub fn handle_query_input_key(
                 .textarea
                 .move_cursor(tui_textarea::CursorMove::Jump(0, col));
             app.query_input.show_suggestions = keep_active;
+            app.query_input.suggestion_anchor_col = if keep_active { Some(col) } else { None };
             state.suggestion_active = keep_active;
             state.lsp_completions.clear();
             state.cached_pipe_type = None;
@@ -285,6 +286,7 @@ pub fn handle_query_input_key(
                     .textarea
                     .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                 app.query_input.show_suggestions = false;
+                app.query_input.suggestion_anchor_col = None;
                 state.suggestion_active = false;
                 state.lsp_completions.clear();
                 state.cached_pipe_type = None;
@@ -294,6 +296,7 @@ pub fn handle_query_input_key(
             }
 
             app.query_input.show_suggestions = false;
+            app.query_input.suggestion_anchor_col = None;
             state.suggestion_active = false;
             let query = app.query_input.textarea.lines()[0].clone();
             app.query_input.push_history(query.clone());
@@ -343,6 +346,7 @@ pub fn handle_query_input_key(
 
             app.structural_hint_active = false;
             app.query_input.show_suggestions = false;
+            app.query_input.suggestion_anchor_col = None;
 
             if suggestion.label == "." {
                 let query_prefix = current_query_prefix(app);
@@ -399,9 +403,15 @@ pub fn handle_query_input_key(
                     app.query_input.suggestion_index = 0;
                     app.query_input.suggestion_scroll = 0;
                     app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                    app.query_input.suggestion_anchor_col = if app.query_input.show_suggestions {
+                        Some(app.query_input.textarea.cursor().1 as u16)
+                    } else {
+                        None
+                    };
                     state.suggestion_active = app.query_input.show_suggestions;
                 } else {
                     app.query_input.show_suggestions = false;
+                    app.query_input.suggestion_anchor_col = None;
                     state.suggestion_active = false;
                 }
                 state.lsp_completions.clear();
@@ -447,6 +457,11 @@ pub fn handle_query_input_key(
                 app.query_input.suggestion_index = 0;
                 app.query_input.suggestion_scroll = 0;
                 app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                app.query_input.suggestion_anchor_col = if app.query_input.show_suggestions {
+                    Some(app.query_input.textarea.cursor().1 as u16)
+                } else {
+                    None
+                };
                 state.suggestion_active = app.query_input.show_suggestions;
                 state.lsp_completions.clear();
                 state.cached_pipe_type = None;
@@ -487,6 +502,8 @@ pub fn handle_query_input_key(
                 app.query_input.suggestion_index = 0;
                 app.query_input.suggestion_scroll = 0;
                 app.query_input.show_suggestions = true;
+                app.query_input.suggestion_anchor_col =
+                    Some(app.query_input.textarea.cursor().1 as u16);
                 state.suggestion_active = true;
                 state.lsp_completions.clear();
                 state.cached_pipe_type = None;
@@ -515,6 +532,7 @@ pub fn handle_query_input_key(
                     .textarea
                     .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                 app.query_input.show_suggestions = true;
+                app.query_input.suggestion_anchor_col = Some(col);
                 state.suggestion_active = true;
                 state.last_edit_at = Instant::now() - state.debounce_duration;
                 state.debounce_pending = true;
@@ -563,6 +581,7 @@ pub fn handle_query_input_key(
                 .textarea
                 .move_cursor(tui_textarea::CursorMove::Jump(0, col));
             app.query_input.show_suggestions = keep_active;
+            app.query_input.suggestion_anchor_col = if keep_active { Some(col) } else { None };
             state.suggestion_active = keep_active;
             state.lsp_completions.clear();
             state.cached_pipe_type = None;
@@ -573,6 +592,7 @@ pub fn handle_query_input_key(
         }
     } else if is_action(keymap::Action::PrevPane) {
         app.query_input.show_suggestions = false;
+        app.query_input.suggestion_anchor_col = None;
         state.suggestion_active = false;
         app.prev_pane();
     } else if is_action(keymap::Action::SuggestionUp) || is_action(keymap::Action::HistoryUp) {
@@ -594,6 +614,7 @@ pub fn handle_query_input_key(
                 app.query_input.clamp_scroll();
             } else {
                 app.query_input.show_suggestions = false;
+                app.query_input.suggestion_anchor_col = None;
                 state.suggestion_active = false;
                 state.lsp_completions.clear();
                 state.cached_pipe_type = None;
@@ -633,6 +654,8 @@ pub fn handle_query_input_key(
             app.structural_hint_active = false;
             if !app.query_input.suggestions.is_empty() {
                 app.query_input.show_suggestions = true;
+                app.query_input.suggestion_anchor_col =
+                    Some(app.query_input.textarea.cursor().1 as u16);
                 app.query_input.suggestion_index = 0;
                 app.query_input.clamp_scroll();
             } else {
@@ -652,6 +675,11 @@ pub fn handle_query_input_key(
                     app.query_input.suggestion_index = 0;
                     app.query_input.suggestion_scroll = 0;
                     app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                    app.query_input.suggestion_anchor_col = if app.query_input.show_suggestions {
+                        Some(app.query_input.textarea.cursor().1 as u16)
+                    } else {
+                        None
+                    };
                     state.suggestion_active = app.query_input.show_suggestions;
                     state.last_edit_at = Instant::now() - state.debounce_duration;
                     state.debounce_pending = true;
@@ -660,6 +688,7 @@ pub fn handle_query_input_key(
                     // Stack empty — exit wizard entirely
                     app.wizard_state = None;
                     app.query_input.show_suggestions = false;
+                    app.query_input.suggestion_anchor_col = None;
                     state.suggestion_active = false;
                     state.lsp_completions.clear();
                     state.cached_pipe_type = None;
@@ -711,6 +740,7 @@ pub fn handle_query_input_key(
                     .textarea
                     .move_cursor(tui_textarea::CursorMove::Jump(0, col));
                 app.query_input.show_suggestions = false;
+                app.query_input.suggestion_anchor_col = None;
                 state.suggestion_active = false;
                 return;
             }
@@ -731,6 +761,7 @@ pub fn handle_query_input_key(
                 state.debounce_pending = true;
             }
             app.query_input.show_suggestions = false;
+            app.query_input.suggestion_anchor_col = None;
             state.suggestion_active = false;
             app.structural_hint_active = false;
             state.lsp_completions.clear();
@@ -750,6 +781,7 @@ pub fn handle_query_input_key(
             new_ta.set_cursor_line_style(ratatui::style::Style::default());
             app.query_input.textarea = new_ta;
             app.query_input.show_suggestions = false;
+            app.query_input.suggestion_anchor_col = None;
             state.suggestion_active = false;
             app.structural_hint_active = false;
             state.lsp_completions.clear();
@@ -779,6 +811,7 @@ pub fn handle_query_input_key(
         state.string_param_expansion_stack.clear();
         app.structural_hint_active = false;
         app.query_input.show_suggestions = false;
+        app.query_input.suggestion_anchor_col = None;
         app.query_input.suggestions.clear();
         app.query_input.textarea.input(key);
         if !state.suggestion_active {
@@ -802,6 +835,7 @@ pub fn handle_query_input_key(
             }
         }
         state.string_param_expansion_stack.clear();
+        app.query_input.suggestion_anchor_col = None;
         state.last_edit_at = Instant::now();
         state.debounce_pending = true;
         let query_prefix = current_query_prefix(app);
@@ -811,6 +845,7 @@ pub fn handle_query_input_key(
         app.structural_hint_active = false;
         if !state.suggestion_active {
             app.query_input.show_suggestions = false;
+            app.query_input.suggestion_anchor_col = None;
             app.query_input.suggestions.clear();
         }
         let new_query = app.query_input.textarea.lines()[0].clone();

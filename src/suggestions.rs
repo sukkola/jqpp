@@ -52,11 +52,13 @@ pub async fn handle_finished_computes(app: &mut App<'_>, state: &mut LoopState) 
                         .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
                 if all_exact {
                     app.query_input.show_suggestions = false;
+                    app.query_input.suggestion_anchor_col = None;
                     state.suggestion_active = false;
                     state.lsp_completions.clear();
                     state.cached_pipe_type = None;
                 } else {
                     app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                    app.query_input.suggestion_anchor_col = None;
                 }
                 app.structural_hint_active = false;
             }
@@ -65,6 +67,7 @@ pub async fn handle_finished_computes(app: &mut App<'_>, state: &mut LoopState) 
             if !crate::hints::maybe_activate_structural_hint(app, &query_prefix) {
                 app.structural_hint_active = false;
                 app.query_input.show_suggestions = false;
+                app.query_input.suggestion_anchor_col = None;
                 app.query_input.suggestions.clear();
             }
         }
@@ -105,12 +108,14 @@ pub async fn run_debounced_compute(
                     .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
             if all_exact {
                 app.query_input.show_suggestions = false;
+                app.query_input.suggestion_anchor_col = None;
                 state.suggestion_active = false;
                 state.lsp_completions.clear();
                 state.cached_pipe_type = None;
                 false
             } else {
                 app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                app.query_input.suggestion_anchor_col = None;
                 has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
             }
         } else if state.suggestion_active {
@@ -227,11 +232,13 @@ pub fn handle_lsp_message(app: &mut App<'_>, state: &mut LoopState, msg: LspMess
                         .any(|s| crate::accept::is_builder_suggestion(s.detail.as_deref()));
                 if all_exact {
                     app.query_input.show_suggestions = false;
+                    app.query_input.suggestion_anchor_col = None;
                     state.suggestion_active = false;
                     state.lsp_completions.clear();
                     state.cached_pipe_type = None;
                 } else {
                     app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                    app.query_input.suggestion_anchor_col = None;
                 }
             }
         }
@@ -1732,6 +1739,7 @@ mod tests {
         assert!(app.structural_hint_active);
         assert!(app.query_input.show_suggestions);
         assert_eq!(app.query_input.suggestions[0].label, ".");
+        assert_eq!(app.query_input.suggestion_anchor_col, Some(0));
     }
 
     #[test]
@@ -1786,6 +1794,7 @@ mod tests {
 
         assert!(!app.structural_hint_active);
         assert!(!app.query_input.show_suggestions);
+        assert_eq!(app.query_input.suggestion_anchor_col, None);
         assert!(app.query_input.suggestions.is_empty());
         assert_eq!(app.dismissed_hint_query.as_deref(), Some(".items"));
     }
