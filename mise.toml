@@ -6,5 +6,174 @@ run = "cargo build --release && PATH=\"$PWD/target/release:$PATH\" vhs demo/demo
 description = "Configure git to use repo commit hooks"
 run = "git config core.hooksPath .githooks && echo 'Hooks configured.'"
 
+[tasks.tui-screenshot-tests]
+description = "Run screenshot parsing unit tests"
+run = "bash scripts/tui/lib/screenshot_test.sh"
+
+[tasks.tui-run-scenarios]
+description = "Run scenario suite with optional filters"
+quiet = true
+shell = "bash -c"
+usage = '''
+arg "<target>" help="Scenario file or directory" default="test-scenarios/"
+flag "--id <id>" help="Only run one exact scenario id"
+flag "--scenario <id>" help="Only run scenario IDs containing this text"
+flag "--query-starts-with <prefix>" help="Only run scenarios whose query starts with this prefix"
+flag "--query-function <function>" help="Only run scenarios whose query uses this function"
+flag "--created-before <date>" help="Only include files with meta.created before date"
+flag "--created-with-version <version>" help="Only include files with meta.jqpp_version containing version"
+flag "--list" help="List matched scenarios without executing"
+'''
+run = '''
+set -eo pipefail
+
+args=()
+[ "${usage_list:-false}" = "true" ] && args+=(--list-scenarios)
+[ -n "${usage_id:-}" ] && args+=(--id "$usage_id")
+[ -n "${usage_scenario:-}" ] && args+=(--scenario "$usage_scenario")
+[ -n "${usage_query_starts_with:-}" ] && args+=(--query-starts-with "$usage_query_starts_with")
+[ -n "${usage_query_function:-}" ] && args+=(--query-function "$usage_query_function")
+[ -n "${usage_created_before:-}" ] && args+=(--created-before "$usage_created_before")
+[ -n "${usage_created_with_version:-}" ] && args+=(--created-with-version "$usage_created_with_version")
+
+bash scripts/tui/run-scenarios.sh "${args[@]}" "${usage_target?}"
+'''
+
+[tasks.tui-run-scenarios-update-baselines]
+description = "Run scenarios and update baselines"
+quiet = true
+shell = "bash -c"
+usage = '''
+arg "<target>" help="Scenario file or directory" default="test-scenarios/"
+flag "--id <id>" help="Only run one exact scenario id"
+flag "--scenario <id>" help="Only run scenario IDs containing this text"
+flag "--query-starts-with <prefix>" help="Only run scenarios whose query starts with this prefix"
+flag "--query-function <function>" help="Only run scenarios whose query uses this function"
+flag "--created-before <date>" help="Only include files with meta.created before date"
+flag "--created-with-version <version>" help="Only include files with meta.jqpp_version containing version"
+'''
+run = '''
+set -eo pipefail
+
+args=(--update-baselines)
+[ -n "${usage_id:-}" ] && args+=(--id "$usage_id")
+[ -n "${usage_scenario:-}" ] && args+=(--scenario "$usage_scenario")
+[ -n "${usage_query_starts_with:-}" ] && args+=(--query-starts-with "$usage_query_starts_with")
+[ -n "${usage_query_function:-}" ] && args+=(--query-function "$usage_query_function")
+[ -n "${usage_created_before:-}" ] && args+=(--created-before "$usage_created_before")
+[ -n "${usage_created_with_version:-}" ] && args+=(--created-with-version "$usage_created_with_version")
+
+bash scripts/tui/run-scenarios.sh "${args[@]}" "${usage_target?}"
+'''
+
+[tasks.tui-run-scenarios-capture]
+description = "Capture actuals for ~ assertions"
+quiet = true
+shell = "bash -c"
+usage = '''
+arg "<target>" help="Scenario file or directory" default="test-scenarios/intellisense/"
+flag "--id <id>" help="Only run one exact scenario id"
+flag "--scenario <id>" help="Only run scenario IDs containing this text"
+'''
+run = '''
+set -eo pipefail
+
+args=(--capture-actuals)
+[ -n "${usage_id:-}" ] && args+=(--id "$usage_id")
+[ -n "${usage_scenario:-}" ] && args+=(--scenario "$usage_scenario")
+
+bash scripts/tui/run-scenarios.sh "${args[@]}" "${usage_target?}"
+'''
+
+[tasks.tui-gen-scenarios]
+description = "Generate scenarios for jq function"
+usage = '''
+arg "<function>" help="jq function name (for example: select)"
+'''
+run = "bash scripts/tui/gen-scenarios.sh ${usage_function?}"
+
+[tasks.tui-explore-paths]
+description = "Generate path scenarios from fixture"
+usage = '''
+arg "<fixture>" help="Fixture JSON file (for example: demo/demo.json)"
+'''
+run = "bash scripts/tui/explore-paths.sh ${usage_fixture?}"
+
+[tasks.tui-validate-scenario]
+description = "Validate scenario YAML structure"
+usage = '''
+arg "<scenario_file>" help="Scenario YAML file to validate"
+'''
+run = "bash scripts/tui/validate-scenario.sh ${usage_scenario_file?}"
+
+[tasks.tui-edit-scenario]
+description = "Open scenario file at the given scenario ID in $EDITOR (default: vi)"
+shell = "bash -c"
+usage = '''
+arg "<scenario_path>" help="Scenario YAML file or directory" default="test-scenarios/"
+flag "--id <scenario_id>" help="Exact scenario id"
+'''
+run = '''
+set -eo pipefail
+
+scenario_path="${usage_scenario_path?}"
+scenario_id="${usage_id:-}"
+
+# Resolve to absolute path
+[[ "$scenario_path" != /* ]] && scenario_path="$PWD/$scenario_path"
+
+if [ -f "$scenario_path" ]; then
+  scenario_file="$scenario_path"
+elif [ -d "$scenario_path" ]; then
+  if [ -z "$scenario_id" ]; then
+    echo "ERROR: --id is required when scenario path is a directory"
+    exit 1
+  fi
+  scenario_file=""
+  while IFS= read -r f; do
+    json=$(bash scripts/tui/lib/yaml2json.sh "$f" 2>/dev/null) || continue
+    count=$(echo "$json" | jaq --arg id "$scenario_id" '[.scenarios[]? | select(.id == $id)] | length' 2>/dev/null || echo 0)
+    if [ "$count" = "1" ]; then scenario_file="$f"; break; fi
+  done < <(rg --files "$scenario_path" -g '*.yaml')
+  [ -z "$scenario_file" ] && { echo "ERROR: scenario id not found: $scenario_id"; exit 1; }
+else
+  echo "ERROR: scenario path not found: $scenario_path"; exit 1
+fi
+
+# Find line number of the id entry (first match)
+line=1
+if [ -n "$scenario_id" ]; then
+  found=$(grep -n "id: $scenario_id" "$scenario_file" | head -1 | cut -d: -f1)
+  [ -n "$found" ] && line="$found"
+fi
+
+exec "${EDITOR:-vi}" "+$line" "$scenario_file"
+'''
+
+[tasks.tui-launch-scenario]
+description = "Build jqpp and launch using scenario input"
+shell = "bash -c"
+usage = '''
+arg "<scenario_path>" help="Scenario YAML file or directory" default="test-scenarios/"
+flag "--id <scenario_id>" help="Exact scenario id (defaults to first scenario in file)"
+flag "--no-query" help="Ignore scenario query/filter and launch with empty query"
+flag "--print-only" help="Print resolved command without launching"
+'''
+run = '''
+set -eo pipefail
+
+args=()
+[ -n "${usage_id:-}" ] && args+=(--id "$usage_id")
+[ "${usage_no_query:-false}" = "true" ] && args+=(--no-query)
+[ "${usage_print_only:-false}" = "true" ] && args+=(--print-only)
+
+bash scripts/tui/launch-scenario.sh "${args[@]}" "${usage_scenario_path?}"
+'''
+
 [tools]
 rust = "1.95"
+node = "lts"
+"aqua:01mf02/jaq" = "latest"
+"aqua:jqlang/jq" = "latest"
+"aqua:BurntSushi/ripgrep" = "latest"
+"npm:agent-tui" = "latest"

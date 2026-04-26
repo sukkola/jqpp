@@ -1,0 +1,66 @@
+meta:
+  created: "2026-04-24"
+  jqpp_version: "jqpp 0.1.0"
+  jqpp_git_sha: "8020921"
+  topic: "dot-open-suggestions"
+  description: "TUI intellisense scenarios: dot-open suggestions, Tab accept, Enter accept+evaluate, Esc close"
+
+# Placeholders: assertion values set to null (~) must be filled in before this
+# scenario can pass. Run the runner in capture mode to discover the real values:
+#
+#   scripts/tui/run-scenarios.sh --capture-actuals test-scenarios/intellisense/dot-open.yaml
+#
+# The runner prints a "Suggested assertions:" block for each null-valued assertion.
+# Copy the printed values back here, then run normally to assert.
+
+scenarios:
+  - id: dot-open-suggests-fields
+    description: "Typing . opens suggestion box with top-level field names"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_extract_suggestions]
+    actions:
+      - type: "."
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: true
+      - suggestions_contain: ["orders", "metadata"]
+      - suggestions_not_contain: []
+
+  - id: dot-tab-accepts-suggestion
+    description: "Tab accepts the highlighted suggestion and closes the box; query shows the accepted field"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query]
+    actions:
+      - type: "."
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: false
+      - query_equals: ~   # run --capture-actuals to fill in
+
+  - id: dot-enter-accepts-and-evaluates
+    description: "Enter accepts the highlighted suggestion AND evaluates (unlike Tab which only accepts)"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query]
+    actions:
+      - type: "."
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: false
+      - query_equals: ~   # run --capture-actuals to fill in; expect same field as Tab but query is then evaluated
+
+  - id: dot-esc-closes-suggestion-box
+    description: "Esc closes the suggestion box; query stays as the bare dot (nothing accepted)"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query]
+    actions:
+      - type: "."
+      - wait_stable: true
+      - press: Escape
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: false
+      - query_equals: "."   # Esc must not change the query

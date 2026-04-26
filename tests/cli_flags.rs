@@ -3,6 +3,32 @@ use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
+fn test_version_includes_semver_and_build_tag() {
+    let output = Command::new("target/debug/jqpp")
+        .arg("--version")
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    // Should be "jqpp X.Y.Z (build-tag)" — semver present
+    assert!(
+        version_str.contains("jqpp"),
+        "version output missing binary name: {version_str}"
+    );
+    // Semver pattern: digits.digits.digits
+    assert!(
+        version_str.chars().any(|c| c.is_ascii_digit()),
+        "version output missing version digits: {version_str}"
+    );
+    // Build tag in parens — either a git SHA, a tag like v0.3.0, or a version string
+    assert!(
+        version_str.contains('(') && version_str.contains(')'),
+        "version output missing build tag in parens: {version_str}"
+    );
+}
+
+#[test]
 fn test_query_flag_sets_initial_query_in_headless_mode() {
     let dir = tempdir().unwrap();
     let input_path = dir.path().join("test.json");

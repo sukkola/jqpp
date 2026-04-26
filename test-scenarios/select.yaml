@@ -1,0 +1,198 @@
+meta:
+  created: "2026-04-24"
+  jqpp_version: "jqpp 0.1.0"
+  jqpp_git_sha: "8020921"
+  topic: "select-function"
+  description: "Evaluation scenarios for the select() function"
+
+scenarios:
+  - id: select-identity-check-number-input
+    description: "identity check with number input"
+    input: '42'
+    filter: '. | select(. != null)'
+    expected_output: |
+      42
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-identity-check-string-input
+    description: "identity check with string input"
+    input: '"hello"'
+    filter: '. | select(. != null)'
+    expected_output: |
+      "hello"
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-identity-check-array-of-numbers
+    description: "identity check with array of numbers"
+    input: '[10, 55, 23, 80]'
+    filter: '. | select(. != null)'
+    expected_output: |
+      [
+        10,
+        55,
+        23,
+        80
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-identity-check-array-of-strings
+    description: "identity check with array of strings"
+    input: '["foo","bar","baz"]'
+    filter: '. | select(. != null)'
+    expected_output: |
+      [
+        "foo",
+        "bar",
+        "baz"
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-identity-check-array-of-objects
+    description: "identity check with array of objects"
+    input: '[{"name":"Alice","age":30},{"name":"Bob","age":17}]'
+    filter: '. | select(. != null)'
+    expected_output: |
+      [
+        {
+          "name": "Alice",
+          "age": 30
+        },
+        {
+          "name": "Bob",
+          "age": 17
+        }
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-identity-check-object-input
+    description: "identity check with object input"
+    input: '{"key":"value","count":5}'
+    filter: '. | select(. != null)'
+    expected_output: |
+      {
+        "key": "value",
+        "count": 5
+      }
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-filter-numbers--30-array-of-numbers
+    description: "filter numbers > 30 with array of numbers"
+    input: '[10, 55, 23, 80]'
+    filter: '.[] | select(. > 30)'
+    expected_output: |
+      55
+      80
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-filter-numbers--30-array-of-strings
+    description: "filter numbers > 30 with array of strings"
+    input: '["foo","bar","baz"]'
+    filter: '.[] | select(. > 30)'
+    expected_output: |
+      "foo"
+      "bar"
+      "baz"
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-filter-numbers--30-array-of-objects
+    description: "filter numbers > 30 with array of objects"
+    input: '[{"name":"Alice","age":30},{"name":"Bob","age":17}]'
+    filter: '.[] | select(. > 30)'
+    expected_output: |
+      {
+        "name": "Alice",
+        "age": 30
+      }
+      {
+        "name": "Bob",
+        "age": 17
+      }
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-filter-numbers--30-object-input
+    description: "filter numbers > 30 with object input"
+    input: '{"key":"value","count":5}'
+    filter: '.[] | select(. > 30)'
+    expected_output: |
+      "value"
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-filter-objects-by-age-array-of-objects
+    description: "filter objects by age with array of objects"
+    input: '[{"name":"Alice","age":30},{"name":"Bob","age":17}]'
+    filter: '.[] | select(.age >= 18)'
+    expected_output: |
+      {
+        "name": "Alice",
+        "age": 30
+      }
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-map-select-positive-array-of-numbers
+    description: "map select positive with array of numbers"
+    input: '[10, 55, 23, 80]'
+    filter: 'map(select(. > 0))'
+    expected_output: |
+      [
+        10,
+        55,
+        23,
+        80
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-map-select-positive-array-of-strings
+    description: "map select positive with array of strings"
+    input: '["foo","bar","baz"]'
+    filter: 'map(select(. > 0))'
+    expected_output: |
+      [
+        "foo",
+        "bar",
+        "baz"
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-map-select-positive-array-of-objects
+    description: "map select positive with array of objects"
+    input: '[{"name":"Alice","age":30},{"name":"Bob","age":17}]'
+    filter: 'map(select(. > 0))'
+    expected_output: |
+      [
+        {
+          "name": "Alice",
+          "age": 30
+        },
+        {
+          "name": "Bob",
+          "age": 17
+        }
+      ]
+    jq_diverges: false
+    tags: [select]
+
+  - id: select-map-select-positive-object-input
+    description: "map select positive with object input"
+    input: '{"key":"value","count":5}'
+    filter: 'map(select(. > 0))'
+    expected_output: |
+      [
+        "value",
+        5
+      ]
+    jq_diverges: false
+    tags: [select]
+
