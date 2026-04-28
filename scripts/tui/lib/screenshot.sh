@@ -65,7 +65,7 @@ _tui_extract_suggestions_overlay() {
         if (s ~ /^[█▌▐▉▊▋▍▎▏║]+$/) return
         if (s ~ /["{},:]/) return
         if (s ~ /^(Query|Input|Output)$/) return
-        if (s ~ /^[._$[:alnum:]\[\]()]+$/) print s
+        if (s ~ /^[._$@[:alnum:]\[\]()+-]+$/) print s
       }
 
       {
@@ -120,7 +120,7 @@ _tui_extract_suggestions_popup() {
         if (s ~ /^[█▌▐▉▊▋▍▎▏║]+$/) return
         if (s ~ /["{},:]/) return
         if (s ~ /^(Query|Input|Output|Screenshot)$/) return
-        if (s ~ /^[._$[:alnum:]\[\]()]+$/) print s
+        if (s ~ /^[._$@[:alnum:]\[\]()+-]+$/) print s
       }
       /Query/ { in_query = 1; next }
       in_query && /└[─]/ && !/│/ { in_query = 0; after_query = 1; next }

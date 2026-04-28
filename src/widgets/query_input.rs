@@ -118,11 +118,17 @@ impl<'a> QueryInput<'a> {
         if let Some(suffix) = ghost {
             let current = &self.textarea.lines()[0];
             let block = self.textarea.block().cloned().unwrap_or_default();
+            // Mirror tui_textarea's horizontal scroll: when the query overflows
+            // the viewport, the cursor sits at the rightmost visible column.
+            let inner_width = area.width.saturating_sub(2) as usize;
+            let scroll_col = current.len().saturating_sub(inner_width) as u16;
             let spans = vec![
                 Span::raw(current.as_str()),
                 Span::styled(suffix, Style::default().fg(Color::DarkGray)),
             ];
-            let paragraph = Paragraph::new(Line::from(spans)).block(block);
+            let paragraph = Paragraph::new(Line::from(spans))
+                .block(block)
+                .scroll((0, scroll_col));
             frame.render_widget(paragraph, area);
         } else {
             frame.render_widget(&self.textarea, area);
@@ -161,21 +167,39 @@ impl<'a> QueryInput<'a> {
             }
         }
         let anchor_col = self.suggestion_anchor_col.unwrap_or(token_start as u16);
-        let x = query_area.x.saturating_add(anchor_col);
-        // Overlap the query bar's bottom border line by starting one row earlier.
-        let y = query_area.y + query_area.height.saturating_sub(1);
-        if y >= screen.height || x >= screen.width {
-            return None;
-        }
+        // When the query is longer than the visible box width, tui_textarea scrolls
+        // so the cursor sits at the rightmost visible column. Convert the logical
+        // anchor column to a visual column by subtracting the scroll offset.
+        let inner_width = query_area.width.saturating_sub(2);
+        let scroll_offset = (cursor_col as u16).saturating_sub(inner_width);
+        let visible_anchor = anchor_col
+            .saturating_sub(scroll_offset)
+            .min(inner_width.saturating_sub(1));
+
         let max_label = self
             .suggestions
             .iter()
             .map(|s| s.label.len() as u16)
             .max()
             .unwrap_or(8);
-        let available_width = screen.width.saturating_sub(x);
         // +2 for left and right border columns.
-        let width = (max_label + 2).min(available_width);
+        let desired_width = (max_label + 2).min(screen.width);
+
+        // Place box at cursor, then shift left if it would overflow the screen.
+        let x_at_cursor = query_area.x.saturating_add(visible_anchor);
+        let x = if x_at_cursor.saturating_add(desired_width) > screen.width {
+            screen.width.saturating_sub(desired_width)
+        } else {
+            x_at_cursor
+        };
+
+        // Overlap the query bar's bottom border line by starting one row earlier.
+        let y = query_area.y + query_area.height.saturating_sub(1);
+        if y >= screen.height || x >= screen.width {
+            return None;
+        }
+        let available_width = screen.width.saturating_sub(x);
+        let width = desired_width.min(available_width);
         let available_height = screen.height.saturating_sub(y);
         // +1 for the bottom border row; items fill the rest.
         let height = (self.suggestions.len() as u16 + 1)
@@ -334,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_hidden_when_cursor_at_screen_edge() {
+    fn dropdown_repositioned_when_cursor_beyond_screen_edge() {
         let narrow = Rect {
             x: 0,
             y: 0,
@@ -347,7 +371,7 @@ mod tests {
             width: 10,
             height: 24,
         };
-        // Explicit anchor at screen edge (x == width) leaves no room.
+        // Anchor beyond visible area: box is repositioned to fit within screen.
         let mut qi = QueryInput::new();
         qi.textarea = tui_textarea::TextArea::from(vec!["123456789".to_string()]);
         qi.textarea.move_cursor(tui_textarea::CursorMove::End);
@@ -358,7 +382,39 @@ mod tests {
             insert_text: ".x".into(),
         }];
         qi.show_suggestions = true;
-        assert!(qi.suggestion_rect(narrow, narrow_screen).is_none());
+        // inner_width=8, visible_anchor=7, desired_width=3 → box at x=7
+        let r = qi.suggestion_rect(narrow, narrow_screen).unwrap();
+        assert_eq!(r.x, 7);
+        assert_eq!(r.width, 3);
+    }
+
+    #[test]
+    fn dropdown_hidden_when_no_room_at_all() {
+        // Screen too narrow to fit even a minimum box.
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 3,
+        };
+        let tiny_screen = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 24,
+        };
+        let mut qi = QueryInput::new();
+        qi.textarea = tui_textarea::TextArea::from(vec!["x".to_string()]);
+        qi.textarea.move_cursor(tui_textarea::CursorMove::End);
+        qi.suggestion_anchor_col = Some(5);
+        qi.suggestions = vec![Suggestion {
+            label: "x".into(),
+            detail: None,
+            insert_text: ".x".into(),
+        }];
+        qi.show_suggestions = true;
+        // desired_width=3 but screen only 2 wide → width<=2 → None
+        assert!(qi.suggestion_rect(tiny, tiny_screen).is_none());
     }
 
     #[test]

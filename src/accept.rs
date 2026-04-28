@@ -172,15 +172,30 @@ pub fn apply_contains_builder_suggestion(
         Some("contains object value") => {
             if finalize {
                 trim_trailing_array_or_object_separators(&mut merged);
-                if merged.ends_with(')') {
-                    merged.pop();
+                // Count how many unclosed `{` are inside the contains(...)
+                let brace_depth = find_unmatched_open_paren(&merged)
+                    .map(|open| unclosed_brace_depth(&merged[open..]))
+                    .unwrap_or(1);
+                if brace_depth > 1 {
+                    // Close all inner levels back to depth 1, then mark ready for next field
+                    for _ in 0..(brace_depth - 1) {
+                        merged.push('}');
+                    }
+                    merged.push_str(", ");
+                    let col = merged.chars().count() as u16;
+                    (merged, col, true)
+                } else {
+                    // At depth 1 — close the entire contains()
+                    if merged.ends_with(')') {
+                        merged.pop();
+                    }
+                    if !merged.ends_with('}') {
+                        merged.push('}');
+                    }
+                    merged.push(')');
+                    let col = merged.chars().count() as u16;
+                    (merged, col, false)
                 }
-                if !merged.ends_with('}') {
-                    merged.push('}');
-                }
-                merged.push(')');
-                let col = merged.chars().count() as u16;
-                (merged, col, false)
             } else {
                 if !merged.ends_with(", ") {
                     merged.push_str(", ");
@@ -530,6 +545,11 @@ pub fn commit_current_string_param_input(
 ) -> Option<(String, u16)> {
     let query_prefix: String = full_query.chars().take(cursor_col).collect();
     let ctx = completions::json_context::string_param_context(&query_prefix, None)?;
+    // Don't commit contains() as a plain string — its inner content is an object/array
+    // builder, not a user-typed string. Wrapping it in quotes would produce invalid jq.
+    if ctx.fn_name == "contains" {
+        return None;
+    }
     let open = find_unmatched_open_paren(&query_prefix)?;
     let escaped = ctx.inner_prefix.replace('"', "\\\"");
     let committed = format!("{}\"{}\")", &query_prefix[..open + 1], escaped);

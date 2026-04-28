@@ -64,7 +64,23 @@ pub async fn handle_finished_computes(app: &mut App<'_>, state: &mut LoopState) 
             }
         } else {
             let query_prefix = current_query_prefix(app);
-            if !crate::hints::maybe_activate_structural_hint(app, &query_prefix) {
+            let in_contains_ctx = completions::json_context::param_field_context(&query_prefix)
+                .map(|ctx| ctx.fn_name == "contains")
+                .unwrap_or(false);
+            if in_contains_ctx {
+                state.suggestion_active = true;
+                app.structural_hint_active = false;
+                app.query_input.suggestions = compute_suggestions(
+                    &query_prefix,
+                    app.executor.as_ref().map(|e| &e.json_input),
+                    &state.lsp_completions,
+                    state.cached_pipe_type.as_deref(),
+                );
+                app.query_input.suggestion_index = 0;
+                app.query_input.suggestion_scroll = 0;
+                app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                app.query_input.suggestion_anchor_col = None;
+            } else if !crate::hints::maybe_activate_structural_hint(app, &query_prefix) {
                 app.structural_hint_active = false;
                 app.query_input.show_suggestions = false;
                 app.query_input.suggestion_anchor_col = None;
@@ -122,7 +138,27 @@ pub async fn run_debounced_compute(
             // Wizard active — keep existing suggestions, hold output if needed
             has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
         } else {
-            false
+            // Auto-activate for contains builder context even when user typed query manually.
+            let in_contains_ctx = completions::json_context::param_field_context(&query_prefix)
+                .map(|ctx| ctx.fn_name == "contains")
+                .unwrap_or(false);
+            if in_contains_ctx {
+                state.suggestion_active = true;
+                app.structural_hint_active = false;
+                app.query_input.suggestions = compute_suggestions(
+                    &query_prefix,
+                    app.executor.as_ref().map(|e| &e.json_input),
+                    &state.lsp_completions,
+                    state.cached_pipe_type.as_deref(),
+                );
+                app.query_input.suggestion_index = 0;
+                app.query_input.suggestion_scroll = 0;
+                app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+                app.query_input.suggestion_anchor_col = None;
+                has_non_exact_suggestion_for_prefix(&query_prefix, &app.query_input.suggestions)
+            } else {
+                false
+            }
         };
         let hold_output_during_suggestions = state.suggestion_active
             && has_non_exact_suggestion
@@ -254,8 +290,25 @@ pub fn compute_suggestions(
     let in_contains_builder_context = completions::json_context::param_field_context(query_prefix)
         .map(|ctx| ctx.fn_name == "contains")
         .unwrap_or(false);
-    let in_string_param_context =
-        completions::json_context::string_param_context(query_prefix, pipe_context_type).is_some();
+    let in_string_param_context = {
+        let from_ctx =
+            completions::json_context::string_param_context(query_prefix, pipe_context_type)
+                .map(|ctx| {
+                    if ctx.fn_name == "contains" {
+                        // For contains(), only use string_param path when cursor is inside a
+                        // string literal (value-typing mode). When at the outer contains() level,
+                        // use the general path so we get correct Object vs Array mode suggestions.
+                        is_inside_string_literal(query_prefix)
+                    } else {
+                        true
+                    }
+                })
+                .unwrap_or(false);
+        // When gate blocked contains (e.g. pipe_context_type = "object"), but we're inside a
+        // string literal inside a contains() call, still use the string_param path to get
+        // multi-result value suggestions.
+        from_ctx || (in_contains_builder_context && is_inside_string_literal(query_prefix))
+    };
     if is_inside_string_literal(query_prefix)
         && !in_string_param_context
         && !in_contains_builder_context
@@ -268,15 +321,23 @@ pub fn compute_suggestions(
             let evaluated =
                 evaluated_string_param_input(query_prefix, input).unwrap_or_else(|| input.clone());
             if let Some((head, tail)) = split_string_param_query_prefix(query_prefix) {
-                completions::json_context::get_completions(&tail, &evaluated)
-                    .into_iter()
-                    .map(|i| completions::CompletionItem {
-                        insert_text: format!("{}{}", head, i.insert_text),
-                        ..i
-                    })
-                    .collect()
+                completions::json_context::get_completions_with_type(
+                    &tail,
+                    &evaluated,
+                    pipe_context_type,
+                )
+                .into_iter()
+                .map(|i| completions::CompletionItem {
+                    insert_text: format!("{}{}", head, i.insert_text),
+                    ..i
+                })
+                .collect()
             } else {
-                completions::json_context::get_completions(query_prefix, &evaluated)
+                completions::json_context::get_completions_with_type(
+                    query_prefix,
+                    &evaluated,
+                    pipe_context_type,
+                )
             }
         } else {
             Vec::new()
@@ -338,7 +399,6 @@ pub fn compute_suggestions(
 
     let (eval_input, eval_tail) = if let Some(input) = json_input {
         if let Some((head, tail)) = split_at_last_pipe(query_prefix) {
-            let tail_is_contains_builder = tail.trim_start().starts_with("contains(");
             let eval_query = Executor::strip_format_op(&head)
                 .map(|(base, _)| base)
                 .unwrap_or(head);
@@ -347,8 +407,6 @@ pub fn compute_suggestions(
                 .and_then(|mut r| {
                     if r.is_empty() {
                         None
-                    } else if tail_is_contains_builder && r.len() > 1 {
-                        Some(serde_json::Value::Array(r))
                     } else {
                         Some(r.swap_remove(0))
                     }
@@ -2647,6 +2705,53 @@ mod tests {
         let input = serde_json::json!({"x": 1});
         let suggs = compute_suggestions("select(", Some(&input), &[], None);
         assert!(!suggs.is_empty(), "expected fallback starters, got empty");
+    }
+
+    #[test]
+    fn compute_suggestions_for_manually_typed_nested_contains_query() {
+        // User manually typed a query with two customer entries and space-comma format.
+        // compute_suggestions should return customer_id/customer_name suggestions.
+        let input = serde_json::json!({
+            "orders": [
+                {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"},
+                 "items": [], "totals": {}}
+            ]
+        });
+        let query = r#".orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com" ,"#;
+        let suggs = compute_suggestions(query, Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        eprintln!("compute_suggestions labels: {:?}", labels);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn compute_suggestions_after_tab_on_nested_email_value() {
+        // After Tab on alice@example.com in second customer.customer_email,
+        // query ends with ", " — should suggest KEY customer_id/customer_name, NOT values.
+        let input = serde_json::json!({"orders": [
+            {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"},
+             "items": [], "totals": {}}
+        ]});
+        let query = r#".orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", "#;
+        let suggs = compute_suggestions(query, Some(&input), &[], None);
+        let labels: Vec<&str> = suggs.iter().map(|s| s.label.as_str()).collect();
+        let details: Vec<Option<&str>> = suggs.iter().map(|s| s.detail.as_deref()).collect();
+        eprintln!("after-tab labels: {:?}", labels);
+        eprintln!("after-tab details: {:?}", details);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id key suggestion in {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"CUST-09"),
+            "expected NO value suggestion CUST-09 in {:?}",
+            labels
+        );
     }
 
     #[test]

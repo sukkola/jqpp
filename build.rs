@@ -6,11 +6,11 @@ fn main() {
 
     // Prefer an explicit GIT_SHA env var (set by Homebrew formula or other
     // hermetic build environments that have no .git directory).
-    if let Ok(sha) = std::env::var("GIT_SHA") {
-        if !sha.is_empty() {
-            println!("cargo:rustc-env=GIT_SHA={sha}");
-            return;
-        }
+    if let Ok(sha) = std::env::var("GIT_SHA")
+        && !sha.is_empty()
+    {
+        println!("cargo:rustc-env=GIT_SHA={sha}");
+        return;
     }
 
     // Try the exact tag pointing at HEAD (gives a clean "v0.3.0" on release builds).

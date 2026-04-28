@@ -362,7 +362,7 @@ run_tui_scenario() {
   done
 
   local -a launch_cmd
-  launch_cmd=(agent-tui run --format json --cwd "$REPO_ROOT" "$REPO_ROOT/target/debug/jqpp" "$abs_input")
+  launch_cmd=(agent-tui run --cols 220 --format json --cwd "$REPO_ROOT" "$REPO_ROOT/target/debug/jqpp" "$abs_input")
   if [ -n "$preload_query" ]; then
     launch_cmd+=(--query "$preload_query")
   fi
@@ -535,7 +535,7 @@ run_tui_scenario() {
         forbidden_labels=$(echo "$assertions_json" | jaq -r ".[$j].suggestions_not_contain[]" 2>/dev/null)
         while IFS= read -r label; do
           [ -n "$label" ] || continue
-          if echo "$actual_suggestions" | grep -qF "$label"; then
+          if echo "$actual_suggestions" | grep -qxF "$label"; then
             scenario_passed=false
             fail_reason="suggestions_not_contain: '$label' found but should not be"$'\n'"  actual suggestions: $(echo "$actual_suggestions" | tr '\n' '|')"$'\n'"  raw screen:"$'\n'"$(echo "$screen" | sed 's/^/    /')"
             break

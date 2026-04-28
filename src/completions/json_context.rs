@@ -37,11 +37,19 @@ pub struct ParamFieldCtx<'a> {
 }
 
 pub fn get_completions(query: &str, input: &Value) -> Vec<CompletionItem> {
+    get_completions_with_type(query, input, None)
+}
+
+pub fn get_completions_with_type(
+    query: &str,
+    input: &Value,
+    input_type: Option<&str>,
+) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
     dot_path_completions(query, input, &mut completions);
     obj_constructor_completions(query, input, &mut completions);
     array_index_completions(query, input, &mut completions);
-    param_field_completions(query, input, &mut completions);
+    param_field_completions(query, input, input_type, &mut completions);
     string_param_completions(query, input, &mut completions);
     completions
 }
@@ -711,7 +719,12 @@ pub fn generate_select_starters(input_value: &Value, inner_prefix: &str) -> Vec<
     generate_select_condition(input_value, inner_prefix, "")
 }
 
-fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
+fn param_field_completions(
+    query: &str,
+    input: &Value,
+    input_type: Option<&str>,
+    out: &mut Vec<CompletionItem>,
+) {
     let Some(ctx) = param_field_context(query) else {
         return;
     };
@@ -729,7 +742,12 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
     });
 
     if ctx.fn_name == "contains" {
-        match context_value {
+        let effective_value = match context_value {
+            Some(Value::Array(arr)) if input_type == Some("object") => arr.first(),
+            v => v,
+        };
+
+        match effective_value {
             Some(Value::Object(map)) => {
                 let open = query[..ctx.inner_start].rfind('(').unwrap_or(0);
                 let inner_full = &query[open + 1..];
@@ -743,19 +761,14 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                     inner_full
                 };
 
-                let (used, value_key, key_prefix, value_prefix) =
+                let (_used, value_key, key_prefix, value_prefix) =
                     parse_contains_object_state(effective_inner);
 
-                // `query[..ctx.inner_start]` is the correct prefix for insert_text: it includes
-                // any already-completed key-value pairs (multi-key support). Strip stray `[`
-                // that the user may have typed (wrong form for object context).
-                let clean_prefix = {
-                    let mut s = query[..ctx.inner_start].to_string();
-                    while s.ends_with('[') {
-                        s.pop();
-                    }
-                    s
-                };
+                // Use query[..open+1] (right after the opening paren) as the prefix base.
+                // Completed outer pairs are added by push_contains_value_items / key-listing
+                // via split_top_level_commas on effective_inner, so we don't need ctx.inner_start
+                // (which uses rfind(',') without depth and picks up commas inside nested braces).
+                let clean_prefix = query[..open + 1].to_string();
 
                 if let Some(key) = value_key {
                     push_contains_value_items(
@@ -772,9 +785,20 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                     if !base.contains('{') {
                         base.push('{');
                     }
+                    // Include completed outer pairs so insert_text preserves them.
+                    if effective_inner.trim_start().starts_with('{') {
+                        let stripped = effective_inner.trim_start().trim_start_matches('{');
+                        let parts = split_top_level_commas(stripped);
+                        if parts.len() > 1 {
+                            for part in &parts[..parts.len() - 1] {
+                                base.push_str(part.trim_start());
+                                base.push_str(", ");
+                            }
+                        }
+                    }
 
                     for key in map.keys() {
-                        if used.contains(key) || !key.starts_with(&key_prefix) {
+                        if !key.starts_with(&key_prefix) {
                             continue;
                         }
                         let item = CompletionItem {
@@ -813,22 +837,13 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                         inner_full
                     };
 
-                    let (used, value_key, key_prefix, value_prefix) =
+                    let (_used, value_key, key_prefix, value_prefix) =
                         parse_contains_object_state(effective_inner);
 
-                    // `query[..ctx.inner_start]` preserves any already-typed key-value pairs
-                    // for multi-key support. It may or may not already have `[{`, so we add
-                    // them only if missing.
-                    let qp = &query[..ctx.inner_start];
-
-                    // Ensure the prefix seen by push_contains_value_items contains `[` so
-                    // it can reconstruct the correct `[{key:` insert_text.
-                    // `qp` ends with `(` when no content was typed yet; add `[` in that case.
-                    let arr_qp = if qp.ends_with('(') {
-                        format!("{}[", qp)
-                    } else {
-                        qp.to_string()
-                    };
+                    // Always anchor to right after `(` so arr_qp never includes partial
+                    // nested content from ctx.inner_start (which uses rfind(',') without
+                    // depth tracking and picks up commas inside nested braces).
+                    let arr_qp = format!("{}[", &query[..open + 1]);
 
                     if let Some(key) = value_key {
                         push_contains_value_items(
@@ -849,6 +864,17 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                             }
                             base.push('{');
                         }
+                        // Include completed outer pairs so insert_text preserves them.
+                        if effective_inner.trim_start().starts_with('{') {
+                            let stripped = effective_inner.trim_start().trim_start_matches('{');
+                            let parts = split_top_level_commas(stripped);
+                            if parts.len() > 1 {
+                                for part in &parts[..parts.len() - 1] {
+                                    base.push_str(part.trim_start());
+                                    base.push_str(", ");
+                                }
+                            }
+                        }
                         let mut all_keys: BTreeSet<String> = BTreeSet::new();
                         for obj in arr.iter().filter_map(Value::as_object) {
                             for k in obj.keys() {
@@ -856,7 +882,7 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                             }
                         }
                         for key in all_keys {
-                            if used.contains(&key) || !key.starts_with(&key_prefix) {
+                            if !key.starts_with(&key_prefix) {
                                 continue;
                             }
                             let item = CompletionItem {
@@ -1171,6 +1197,19 @@ fn push_contains_value_items(
     {
         value_base.push('{');
     }
+    // Include any already-completed outer key-value pairs so that insert_text
+    // preserves them when accepting a suggestion for a later key.
+    // e.g. `{pair1, pair2, current: ` → value_base includes `{pair1, pair2, `.
+    if inner_full.trim_start().starts_with('{') {
+        let stripped = inner_full.trim_start().trim_start_matches('{');
+        let parts = split_top_level_commas(stripped);
+        if parts.len() > 1 {
+            for part in &parts[..parts.len() - 1] {
+                value_base.push_str(part.trim_start());
+                value_base.push_str(", ");
+            }
+        }
+    }
 
     if is_field_object_type(input, context_path, key) {
         // Object-typed field: nested builder instead of full-object serialization.
@@ -1197,14 +1236,24 @@ fn push_contains_value_items(
         } else {
             // `{` already typed — parse the nested object state.
             let nested_content = &vp[1..]; // strip leading `{`
-            let nested_base = format!("{}{}: {{", value_base, key); // e.g. `contains({customer: {`
+            let base_prefix = format!("{}{}: {{", value_base, key); // e.g. `contains({customer: {`
 
             let (nested_used, nested_value_key, nested_key_prefix, nested_value_prefix) =
                 parse_contains_object_state(&format!("{{{}", nested_content));
 
-            if let Some(sub_key) = nested_value_key {
+            if let Some(ref sub_key) = nested_value_key {
                 // Sub-key chosen — suggest scalar values for it.
-                for lit in values_for_sub_key(input, context_path, key, &sub_key) {
+                // Build nested_base to include already-completed pairs before this sub_key.
+                // Note: value_prefix comes from parse_contains_object_state which applies
+                // v.trim(), stripping any trailing space after "key:". Use "key:" (no space)
+                // as needle so rfind works regardless of trailing-space presence.
+                let needle = format!("{}:", sub_key);
+                let completed_before = nested_content
+                    .rfind(&needle)
+                    .map(|pos| &nested_content[..pos])
+                    .unwrap_or("");
+                let nested_base = format!("{}{}", base_prefix, completed_before);
+                for lit in values_for_sub_key(input, context_path, key, sub_key) {
                     if !lit.trim_matches('"').starts_with(&nested_value_prefix) {
                         continue;
                     }
@@ -1221,7 +1270,19 @@ fn push_contains_value_items(
                     }
                 }
             } else {
-                // Still choosing a sub-key.
+                // Still choosing a sub-key — include already-completed pairs in base.
+                let completed_raw =
+                    &nested_content[..nested_content.len() - nested_key_prefix.len()];
+                // Normalize trailing comma to ", " (v.trim() in parse_contains_object_state
+                // strips the space that follows the comma in the typed query).
+                let completed_buf;
+                let completed_before: &str = if completed_raw.ends_with(',') {
+                    completed_buf = format!("{} ", completed_raw);
+                    &completed_buf
+                } else {
+                    completed_raw
+                };
+                let nested_base = format!("{}{}", base_prefix, completed_before);
                 let sub_keys = collect_sub_keys(input, context_path, key);
                 for sub_key in &sub_keys {
                     if nested_used.contains(sub_key) || !sub_key.starts_with(&nested_key_prefix) {
@@ -1779,6 +1840,9 @@ fn obj_constructor_completions(query: &str, input: &Value, out: &mut Vec<Complet
     // For  `.foo | {bar`  the context is `.foo`.
     let context_path = pipe_context_before(before_brace);
 
+    if !is_path_like(context_path) {
+        return;
+    }
     if let Some(Value::Object(map)) = find_value_at_path(input, context_path) {
         for key in map.keys() {
             if key.starts_with(partial_field) {
@@ -3094,6 +3158,65 @@ mod tests {
 
         let c = get_completions("has(", &json!(42));
         assert!(c.iter().all(|i| !i.insert_text.starts_with("has(")));
+    }
+
+    #[test]
+    fn contains_nested_after_value_with_comma_suggests_next_key() {
+        // After accepting customer_email value (with trailing comma-space), should suggest
+        // remaining sub-keys of customer, NOT values.
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"}}
+            ]
+        });
+
+        let c = get_completions(
+            r#".orders | contains([{customer: {customer_email: "alice@example.com", "#,
+            &input,
+        );
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        let inserts: Vec<_> = c.iter().map(|i| i.insert_text.as_str()).collect();
+        eprintln!("labels: {:?}", labels);
+        eprintln!("inserts: {:?}", inserts);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"CUST-09"),
+            "should NOT suggest value CUST-09, got {:?}",
+            labels
+        );
+        assert!(
+            has_insert(
+                &c,
+                r#".orders | contains([{customer: {customer_email: "alice@example.com", customer_id: "#
+            ),
+            "expected insert_text with customer_id key (space after comma), got {:?}",
+            inserts
+        );
+    }
+
+    #[test]
+    fn contains_nested_second_customer_with_space_comma_suggests_next_key() {
+        // After completing first customer and partially building second customer with
+        // space-comma format (old builder output), should suggest customer_id as next key.
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"},
+                 "items": [], "totals": {}}
+            ]
+        });
+        let query = r#".orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com" ,"#;
+        let c = get_completions(query, &input);
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        eprintln!("labels for second nested: {:?}", labels);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels
+        );
     }
 
     // ── select_condition_context ──────────────────────────────────────────────

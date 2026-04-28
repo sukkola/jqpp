@@ -1,0 +1,41 @@
+Screenshot:
+┌ Query ───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│.orders | contains("[{customer: {customer_email: \"alice@example.com\"} ,")                                           │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ ┌ Input ─────────────────────────────────────────────────┐▲ ┌ Output ────────────────────────────────────────────────┐
+ │{                                                       │█ │false                                                   │
+ │  "store_id": "STORE-001",                              │█ │                                                        │
+ │  "store_name": "Nordic Widgets",                       │█ │                                                        │
+ │  "store_region": "EU-NORTH",                           │█ │                                                        │
+ │  "metadata": {                                         │█ │                                                        │
+ │    "exported_at": "2024-01-15T10:00:00Z",              │█ │                                                        │
+ │    "version": 2                                        │█ │                                                        │
+ │  },                                                    │█ │                                                        │
+ │  "orders": [                                           │█ │                                                        │
+ │    {                                                   │║ │                                                        │
+ │      "order_id": "ORD-001",                            │║ │                                                        │
+ │      "order_status": "shipped",                        │║ │                                                        │
+ │      "order_date": "2024-01-10",                       │║ │                                                        │
+ │      "customer": {                                     │║ │                                                        │
+ │        "customer_id": "CUST-42",                       │║ │                                                        │
+ │        "customer_name": "Alice Korhonen",              │║ │                                                        │
+ │        "customer_email": "alice@example.com"           │║ │                                                        │
+ │      },                                                │║ │                                                        │
+ │      "items": [                                        │║ │                                                        │
+ │        { "sku": "WIDGET-A", "qty": 2, "unit_price":    │║ │                                                        │
+ │29.99, "total_price": 59.98 },                          │║ │                                                        │
+ │        { "sku": "GADGET-B", "qty": 1, "unit_price":    │║ │                                                        │
+ │99.00, "total_price": 99.00 }                           │║ │                                                        │
+ │      ],                                                │║ │                                                        │
+ │      "totals": {                                       │║ │                                                        │
+ │        "subtotal": 158.98,                             │║ │                                                        │
+ │        "tax": 12.72,                                   │║ │                                                        │
+ │        "discount": 0.00,                               │║ │                                                        │
+ │        "grand_total": 171.70                           │║ │                                                        │
+ │      }                                                 │║ │                                                        │
+ │    },                                                  │║ │                                                        │
+ │    {                                                   │║ │                                                        │
+ │      "order_id": "ORD-002",                            │║ │                                                        │
+ └────────────────────────────────────────────────────────┘▼ └────────────────────────────────────────────────────────┘
+demo.json | 2.3 KB                                          1 results
+ enter submit · tab nav · ctrl+c quit · ctrl+y copy · ctrl+t hide input · ctrl+s save

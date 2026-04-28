@@ -1,0 +1,3 @@
+alice@example.com
+mikko@example.com
+sara@example.com

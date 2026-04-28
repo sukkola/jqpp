@@ -59,9 +59,24 @@ scenarios:
     assertions:
       - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", '
       - suggestions_visible: true
-      - suggestions_contain: ["mikko@example.com","alice@example.com","sara@example.com"]
+      - suggestions_contain: ["customer_id","customer_name"]
     status: active
-
+  
+  - id: contains-tab-completes-object-value-value-field
+    description: "Tabbing into 'customer_email' after contains( results in object syntax [{customer: {customer_email: "
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", '
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer_id: "CUST-09"'
+      - suggestions_visible: true
+      - suggestions_contain: ["CUST-09"]
+      - suggestions_not_contain: ["customer","customer_name"]
+    status: active
   - id: contains-enter-approve-inner-object
     description: "Enter on customer_email suggestion inside contains([{customer: { accepts value and shows outer object field suggestions"
     input_file: "demo/demo.json"
@@ -72,7 +87,7 @@ scenarios:
       - press: Enter
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer:'
       - suggestions_visible: true
       - suggestions_contain: ["customer","items"]
     status: active
@@ -99,7 +114,7 @@ scenarios:
       - press: Enter
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer:'
       - suggestions_visible: true
       - suggestions_contain: ["customer","items"]
     status: active
@@ -121,13 +136,14 @@ scenarios:
     input_file: "demo/demo.json"
     asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
     actions:
-      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, '
       - wait_stable: true
       - press: Enter
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"} , customer"'
-      - suggestions_visible: false
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_email"]
     status: active
 
   - id: contains-esc-closes-inner-object-outer-suggestion
@@ -140,7 +156,7 @@ scenarios:
       - press: Esc
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}}])"'
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}}])'
       - suggestions_visible: false
     status: active
   - id: contains-enter-closes-inner-object-outer-suggestion3
@@ -163,12 +179,12 @@ scenarios:
     input_file: "demo/demo.json"
     asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
     actions:
-      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com" ,'
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", '
       - wait_stable: true
       - press: Tab
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: '
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09"'
       - suggestions_visible: true
       - suggestions_contain: ["CUST-09","CUST-17","CUST-42"]
       - suggestions_not_contain: ["customer","items","totals","customer_email"]
@@ -178,12 +194,12 @@ scenarios:
     input_file: "demo/demo.json"
     asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
     actions:
-      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: '
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: '
       - wait_stable: true
       - press: Enter
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com"},  '
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com"}, customer:'
       - suggestions_visible: true
       - suggestions_contain: ["customer","items","totals"]
       - suggestions_not_contain: ["customer_email"]
@@ -193,27 +209,27 @@ scenarios:
     input_file: "demo/demo.json"
     asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
     actions:
-      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09", '
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: '
       - wait_stable: true
       - press: Tab
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09", '
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09", '
       - suggestions_visible: true
-      - suggestions_contain: ["customer_email","customer_id","customer_name"]
-      - suggestions_not_contain: ["customer","items","totals"]
+      - suggestions_contain: ["customer_name"]
+      - suggestions_not_contain: ["customer","items","totals","customer_id"]
     status: active
   - id: contains-enter-closes-second-inner-objects-fields
     description: "Enter on customer_id field inside nested object accepts value, closes inner object, and shows outer field suggestions"
     input_file: "demo/demo.json"
     asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
     actions:
-      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: '
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: '
       - wait_stable: true
       - press: Enter
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}'
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}'
       - suggestions_visible: true
       - suggestions_contain: ["customer","items","totals"]
       - suggestions_not_contain: ["customer_email","customer_id","customer_name"]
@@ -228,6 +244,6 @@ scenarios:
       - press: Esc
       - wait_stable: true
     assertions:
-      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}}]'
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}}}]'
       - suggestions_visible: false
     status: active

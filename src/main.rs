@@ -293,7 +293,9 @@ async fn run(
         // Split the query on control chars: text portion goes into the textarea,
         // \n and \t become startup key events (Enter and Tab respectively).
         let text_part: String = q.chars().take_while(|c| *c != '\n' && *c != '\t').collect();
-        let keys_part: String = q.chars().skip_while(|c| *c != '\n' && *c != '\t')
+        let keys_part: String = q
+            .chars()
+            .skip_while(|c| *c != '\n' && *c != '\t')
             .filter(|c| *c == '\n' || *c == '\t')
             .collect();
 
