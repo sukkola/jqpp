@@ -1,0 +1,1 @@
+.orders | contains("[{customer: {customer_email: \"alice@example.com\"} ,")

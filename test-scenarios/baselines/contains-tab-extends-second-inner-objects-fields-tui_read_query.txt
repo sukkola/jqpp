@@ -1,0 +1,1 @@
+.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09", customer_name:

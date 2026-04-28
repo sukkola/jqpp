@@ -12,6 +12,7 @@ use jqpp::completions::CompletionItem;
 use jqpp::keymap::Keymap;
 use ratatui::Terminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -37,6 +38,7 @@ pub struct LoopState {
     pub pending_qp: String,
     pub debounce_duration: Duration,
     pub string_param_expansion_stack: Vec<(String, usize)>,
+    pub pending_startup_events: VecDeque<Event>,
 }
 
 impl LoopState {
@@ -56,6 +58,7 @@ impl LoopState {
             pending_qp: String::new(),
             debounce_duration: Duration::from_millis(50),
             string_param_expansion_stack: Vec::new(),
+            pending_startup_events: VecDeque::new(),
         }
     }
 
@@ -104,9 +107,13 @@ impl LoopState {
             MAX_READ_EVENTS_NORMAL
         };
 
-        let first_event = match event::read() {
-            Ok(evt) => evt,
-            Err(_) => return Ok(()),
+        let first_event = if let Some(ev) = self.pending_startup_events.pop_front() {
+            ev
+        } else {
+            match event::read() {
+                Ok(evt) => evt,
+                Err(_) => return Ok(()),
+            }
         };
 
         let mut queue_event = |evt: Event, pending_events: &mut Vec<Event>| {

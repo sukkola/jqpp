@@ -437,7 +437,7 @@ const BUILTINS: &[(&str, &str, &str, InputType)] = &[
     ),
     (
         "select",
-        "select(. != null)",
+        "select()",
         "filter — pass or empty",
         InputType::Any,
     ),

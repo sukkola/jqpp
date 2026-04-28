@@ -38,7 +38,7 @@ type LoadInputsResult = (
 );
 
 #[derive(Parser, Debug)]
-#[command(version)]
+#[command(version, long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_SHA"), ")"))]
 #[command(group(
     ArgGroup::new("output")
         .args(["print_output", "print_query", "print_input"])
@@ -290,8 +290,23 @@ async fn run(
     if let Some(q) = args.query.as_ref()
         && !q.is_empty()
     {
-        app.query_input.textarea.insert_str(q);
-        let query_len = q.chars().count();
+        // Split the query on control chars: text portion goes into the textarea,
+        // \n and \t become startup key events (Enter and Tab respectively).
+        let text_part: String = q.chars().take_while(|c| *c != '\n' && *c != '\t').collect();
+        let keys_part: String = q
+            .chars()
+            .skip_while(|c| *c != '\n' && *c != '\t')
+            .filter(|c| *c == '\n' || *c == '\t')
+            .collect();
+
+        if !text_part.is_empty() {
+            app.query_input.textarea.insert_str(&text_part);
+        }
+        if !keys_part.is_empty() {
+            app.startup_keys = Some(keys_part);
+        }
+
+        let query_len = text_part.chars().count();
         let resolved = resolve_cursor(args.cursor, query_len);
         app.query_input
             .textarea
@@ -369,6 +384,26 @@ async fn main_loop<B: ratatui::backend::Backend>(
     let mut state = LoopState::new();
     state.debounce_duration = Duration::from_millis(80);
 
+    // Populate startup key events from control chars embedded in the query string.
+    // \n encodes Enter, \t encodes Tab — these were parsed out of --query at startup
+    // and stored in app.startup_keys; inject them before the first terminal read.
+    if let Some(keys) = app.startup_keys.take() {
+        use ratatui::crossterm::event::{Event, KeyEvent, KeyEventKind, KeyEventState};
+        for ch in keys.chars() {
+            let code = match ch {
+                '\n' => ratatui::crossterm::event::KeyCode::Enter,
+                '\t' => ratatui::crossterm::event::KeyCode::Tab,
+                _ => continue,
+            };
+            state.pending_startup_events.push_back(Event::Key(KeyEvent {
+                code,
+                modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }));
+        }
+    }
+
     let mut key_log: Option<std::fs::File> = std::env::var("JQPP_KEY_LOG").ok().and_then(|path| {
         std::fs::OpenOptions::new()
             .create(true)
@@ -419,8 +454,9 @@ async fn main_loop<B: ratatui::backend::Backend>(
             handle_lsp_message(app, &mut state, msg);
         }
 
-        if ratatui::crossterm::event::poll(Duration::from_millis(8))
-            .context("Failed to poll for terminal events")?
+        if !state.pending_startup_events.is_empty()
+            || ratatui::crossterm::event::poll(Duration::from_millis(8))
+                .context("Failed to poll for terminal events")?
         {
             state
                 .poll_and_process_events(terminal, app, keymap, &mut key_log)

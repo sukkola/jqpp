@@ -1,0 +1,6 @@
+customer
+items
+order_date
+order_id
+order_status
+totals

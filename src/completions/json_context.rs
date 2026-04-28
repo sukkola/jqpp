@@ -37,11 +37,19 @@ pub struct ParamFieldCtx<'a> {
 }
 
 pub fn get_completions(query: &str, input: &Value) -> Vec<CompletionItem> {
+    get_completions_with_type(query, input, None)
+}
+
+pub fn get_completions_with_type(
+    query: &str,
+    input: &Value,
+    input_type: Option<&str>,
+) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
     dot_path_completions(query, input, &mut completions);
     obj_constructor_completions(query, input, &mut completions);
     array_index_completions(query, input, &mut completions);
-    param_field_completions(query, input, &mut completions);
+    param_field_completions(query, input, input_type, &mut completions);
     string_param_completions(query, input, &mut completions);
     completions
 }
@@ -237,7 +245,486 @@ pub fn string_param_context<'a>(
     gate_string_param_context(ctx, input_type)
 }
 
-fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionItem>) {
+// ──────────────────────────────────────────────────────────────────────────────
+// select() condition intellisense
+// ──────────────────────────────────────────────────────────────────────────────
+
+pub struct SelectConditionCtx<'a> {
+    /// The pipeline prefix before `select(` (used to resolve the input value).
+    pub context_path: &'a str,
+    /// What the user has typed so far inside the parens.
+    pub inner_prefix: &'a str,
+}
+
+/// Detect when the query cursor is inside `select(…)`.
+///
+/// Returns `None` when the cursor is outside a `select(` argument position.
+pub fn select_condition_context(query: &str) -> Option<SelectConditionCtx<'_>> {
+    if query.is_empty() {
+        return None;
+    }
+
+    // Walk backwards tracking paren depth; stop at the innermost unclosed `(`.
+    let mut depth: i32 = 0;
+    let mut open_paren: Option<usize> = None;
+    for (idx, ch) in query.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 {
+                    open_paren = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let open = open_paren?;
+
+    let before_open = query[..open].trim_end();
+    if before_open.is_empty() {
+        return None;
+    }
+
+    // Extract the function name immediately before `(`.
+    let fn_end = before_open.len();
+    let mut fn_start = fn_end;
+    for (idx, ch) in before_open.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            fn_start = idx;
+        } else {
+            break;
+        }
+    }
+    if fn_start == fn_end {
+        return None;
+    }
+    let fn_name = &before_open[fn_start..fn_end];
+    if fn_name != "select" {
+        return None;
+    }
+
+    let context_path = pipe_context_before(before_open[..fn_start].trim_end());
+    let inner_prefix = query[open + 1..].trim_start();
+
+    Some(SelectConditionCtx {
+        context_path,
+        inner_prefix,
+    })
+}
+
+/// Returns true if `s` already contains a comparison operator, indicating
+/// the user is in the value-typing phase (no more wizard starters needed).
+fn select_has_comparison_op(s: &str) -> bool {
+    for op in &[" >= ", " <= ", " != ", " == ", " > ", " < ", " % "] {
+        if s.contains(op) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return a static type-name string for a jq value.
+fn value_type_str(v: &Value) -> &'static str {
+    match v {
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Bool(_) => "bool",
+        Value::Null => "null",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Evaluate a single simple jq step against a value, returning the result.
+///
+/// Handles field access (`.field`), identity (`.`), and common zero-argument
+/// functions (`first`, `last`, `flatten`, `keys`, `values`, `length`, `type`,
+/// string transforms, math). Returns `None` when the step is unknown or
+/// inapplicable — callers should fall back gracefully.
+fn apply_one_step(input: &Value, step: &str) -> Option<Value> {
+    let step = step.trim();
+    if step.is_empty() || step == "." {
+        return Some(input.clone());
+    }
+    // Field access: .field (single level, no array suffix)
+    if let Some(key) = step.strip_prefix('.') {
+        if key.is_empty() {
+            return Some(input.clone());
+        }
+        if let Value::Object(map) = input {
+            return map.get(key).cloned();
+        }
+        return None;
+    }
+    match step {
+        "first" => {
+            if let Value::Array(arr) = input {
+                return arr.first().cloned();
+            }
+            None
+        }
+        "last" => {
+            if let Value::Array(arr) = input {
+                return arr.last().cloned();
+            }
+            None
+        }
+        "flatten" => {
+            // Return an array placeholder — element type unknown without deeper analysis.
+            if matches!(input, Value::Array(_)) {
+                return Some(Value::Array(vec![]));
+            }
+            None
+        }
+        "keys" => {
+            if let Value::Object(map) = input {
+                let keys: Vec<Value> = map.keys().map(|k| Value::String(k.clone())).collect();
+                return Some(Value::Array(keys));
+            }
+            None
+        }
+        "values" => {
+            if let Value::Object(map) = input {
+                let vals: Vec<Value> = map.values().cloned().collect();
+                return Some(Value::Array(vals));
+            }
+            None
+        }
+        "length" | "length?" => Some(Value::Number(serde_json::Number::from(0))),
+        "type" => Some(Value::String(String::new())), // type() → string
+        "ascii_downcase" | "ascii_upcase" | "ltrimstr" | "rtrimstr" => {
+            if matches!(input, Value::String(_)) {
+                return Some(Value::String(String::new()));
+            }
+            None
+        }
+        "floor" | "ceil" | "round" | "fabs" | "sqrt" | "nan" | "infinite" => {
+            if matches!(input, Value::Number(_)) {
+                return Some(Value::Number(serde_json::Number::from(0)));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Walk a ` | `-separated chain of simple steps, returning the resulting value.
+///
+/// Stops and returns the last successfully evaluated value when a step is
+/// unknown — the result is still useful for type inference of earlier steps.
+fn evaluate_select_chain(input: &Value, chain: &str) -> Value {
+    let mut current = input.clone();
+    for step in chain.split(" | ") {
+        match apply_one_step(&current, step.trim()) {
+            Some(v) => current = v,
+            None => break, // unknown step — return what we have
+        }
+    }
+    current
+}
+
+/// Infer the type that `path` (a single step) produces from `input_value`,
+/// also returning the concrete value when available for further inspection.
+fn infer_path_type(path: &str, input_value: &Value) -> (&'static str, Option<Value>) {
+    // Functions with known return types regardless of input
+    match path {
+        "length" | "length?" => return ("number", None),
+        "type" => return ("type_selector", None),
+        _ => {}
+    }
+
+    // Evaluate the step to get the concrete result, then derive type from it
+    match apply_one_step(input_value, path) {
+        Some(v) => {
+            let t = value_type_str(&v);
+            (t, Some(v))
+        }
+        None => ("unknown", None),
+    }
+}
+
+/// Build comparison-operator items for a value of `value_type`.
+/// `insert_prefix` is prepended to every insert_text so the full condition
+/// stays intact when the user accepts an operator.
+fn build_operator_items(
+    value_type: &str,
+    insert_prefix: &str,
+    pipeable: bool, // whether to also offer `| ` for sub-expression chaining
+) -> Vec<CompletionItem> {
+    let ops: &[&str] = match value_type {
+        "number" => &[
+            "> ", "< ", "== ", ">= ", "<= ", "!= ", "% 2 == 0", "!= null",
+        ],
+        "string" => &["== ", "!= ", "!= null"],
+        "bool" => &["== true", "== false", "!= null"],
+        "null" => &["== null", "!= null"],
+        "array" | "object" => &["!= null", "== null"],
+        "type_selector" => &[
+            "== \"string\"",
+            "== \"number\"",
+            "== \"array\"",
+            "== \"object\"",
+            "== \"boolean\"",
+            "== \"null\"",
+        ],
+        _ => &["!= null", "== null"],
+    };
+
+    let mut items: Vec<CompletionItem> = ops
+        .iter()
+        .map(|op| CompletionItem {
+            label: op.to_string(),
+            detail: Some("select op".to_string()),
+            insert_text: format!("{}{}", insert_prefix, op),
+        })
+        .collect();
+
+    // Offer `| ` continuation for types that support meaningful sub-expressions.
+    // Tag as "select path" so keep_active=true after acceptance.
+    if pipeable && matches!(value_type, "array" | "object" | "string") {
+        items.push(CompletionItem {
+            label: "| ".to_string(),
+            detail: Some("select path".to_string()),
+            insert_text: format!("{}| ", insert_prefix),
+        });
+    }
+
+    items
+}
+
+/// Build path-phase items (selectors) for `current_value` filtered by `typed`.
+/// `insert_prefix` is prepended to all insert_text values.
+fn build_path_items(
+    current_value: &Value,
+    typed: &str,
+    insert_prefix: &str,
+) -> Vec<CompletionItem> {
+    let matches = |label: &str| -> bool {
+        typed.is_empty() || label.starts_with(typed) || label.contains(typed)
+    };
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    match current_value {
+        Value::Object(map) => {
+            for (key, _) in map.iter().take(8) {
+                let label = format!(".{}", key);
+                if matches(&label) {
+                    items.push(CompletionItem {
+                        label: label.clone(),
+                        detail: Some("select path".to_string()),
+                        insert_text: format!("{}{} ", insert_prefix, label),
+                    });
+                }
+            }
+            if (typed.is_empty() || typed == ".") && !map.is_empty() {
+                items.push(CompletionItem {
+                    label: ".".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}. ", insert_prefix),
+                });
+            }
+            if matches("has(") {
+                items.push(CompletionItem {
+                    label: "has(".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}has(", insert_prefix),
+                });
+            }
+        }
+        Value::Array(_) => {
+            // Offer array-level selectors. Do NOT recurse into element type;
+            // that is handled by the post-pipe phase after the user adds `| `.
+            if matches(".") {
+                items.push(CompletionItem {
+                    label: ".".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}. ", insert_prefix),
+                });
+            }
+            for (label, insert) in [
+                ("first", "first "),
+                ("last", "last "),
+                ("flatten", "flatten "),
+                ("map(", "map("),
+                ("any", "any"),
+                ("all", "all"),
+            ] {
+                if matches(label) {
+                    items.push(CompletionItem {
+                        label: label.to_string(),
+                        detail: Some("select path".to_string()),
+                        insert_text: format!("{}{}", insert_prefix, insert),
+                    });
+                }
+            }
+        }
+        Value::String(_) => {
+            if matches(".") {
+                items.push(CompletionItem {
+                    label: ".".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}. ", insert_prefix),
+                });
+            }
+            for (label, insert) in [
+                ("startswith(", "startswith("),
+                ("endswith(", "endswith("),
+                ("test(", "test("),
+            ] {
+                if matches(label) {
+                    items.push(CompletionItem {
+                        label: label.to_string(),
+                        detail: Some("select path".to_string()),
+                        insert_text: format!("{}{}", insert_prefix, insert),
+                    });
+                }
+            }
+        }
+        Value::Number(_) => {
+            if matches(".") {
+                items.push(CompletionItem {
+                    label: ".".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}. ", insert_prefix),
+                });
+            }
+        }
+        Value::Bool(_) | Value::Null => {
+            if matches(".") {
+                items.push(CompletionItem {
+                    label: ".".to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}. ", insert_prefix),
+                });
+            }
+        }
+    }
+
+    // `type` is valid for any value.
+    if matches("type") && !items.iter().any(|i| i.label == "type") {
+        items.push(CompletionItem {
+            label: "type".to_string(),
+            detail: Some("select path".to_string()),
+            insert_text: format!("{}type ", insert_prefix),
+        });
+    }
+
+    // `length` applies to string, array, object, null.
+    if matches!(
+        current_value,
+        Value::String(_) | Value::Array(_) | Value::Object(_) | Value::Null
+    ) && matches("length")
+        && !items.iter().any(|i| i.label == "length")
+    {
+        items.push(CompletionItem {
+            label: "length".to_string(),
+            detail: Some("select path".to_string()),
+            insert_text: format!("{}length ", insert_prefix),
+        });
+    }
+
+    // String transforms
+    if matches!(current_value, Value::String(_)) {
+        for (label, insert) in [
+            ("ascii_downcase", "ascii_downcase "),
+            ("ascii_upcase", "ascii_upcase "),
+            ("ltrimstr(", "ltrimstr("),
+            ("rtrimstr(", "rtrimstr("),
+        ] {
+            if matches(label) && !items.iter().any(|i| i.label == label) {
+                items.push(CompletionItem {
+                    label: label.to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}{}", insert_prefix, insert),
+                });
+            }
+        }
+    }
+
+    // Object utilities
+    if matches!(current_value, Value::Object(_)) {
+        for (label, insert) in [("keys", "keys "), ("values", "values ")] {
+            if matches(label) && !items.iter().any(|i| i.label == label) {
+                items.push(CompletionItem {
+                    label: label.to_string(),
+                    detail: Some("select path".to_string()),
+                    insert_text: format!("{}{}", insert_prefix, insert),
+                });
+            }
+        }
+    }
+
+    items
+}
+
+/// Core recursive engine for select-condition completions.
+///
+/// `current_value`: the jq value at the start of this pipeline segment.
+/// `inner_prefix`:  what the user has typed in this segment (after the last ` | `).
+/// `insert_prefix`: fixed prefix to prepend to every insert_text so the full
+///                  condition is always valid.
+///
+/// Phases (evaluated in order):
+/// 1. **Value phase** — comparison operator already present → empty (user types literal).
+/// 2. **Pipe phase**  — inner_prefix contains ` | ` → evaluate left side, recurse right.
+/// 3. **Operator phase** — inner_prefix ends with space after a non-empty path → offer
+///    comparison operators (and `| ` continuation for array/object/string).
+/// 4. **Path phase** — offer type-appropriate selectors/functions.
+fn generate_select_condition(
+    current_value: &Value,
+    inner_prefix: &str,
+    insert_prefix: &str,
+) -> Vec<CompletionItem> {
+    // 1. Value phase
+    if select_has_comparison_op(inner_prefix) {
+        return vec![];
+    }
+
+    // 2. Pipe phase — find the rightmost ` | ` and recurse
+    if let Some(pipe_pos) = inner_prefix.rfind(" | ") {
+        let left = inner_prefix[..pipe_pos].trim();
+        let right = &inner_prefix[pipe_pos + 3..];
+        let new_insert_prefix = format!("{}{} | ", insert_prefix, left);
+        let segment_value = evaluate_select_chain(current_value, left);
+        return generate_select_condition(&segment_value, right, &new_insert_prefix);
+    }
+
+    // 3. Operator phase
+    if inner_prefix.ends_with(' ') && !inner_prefix.trim().is_empty() {
+        let path = inner_prefix.trim_end_matches(' ');
+        let (value_type, resolved) = infer_path_type(path, current_value);
+        let effective = resolved.as_ref().unwrap_or(current_value);
+        let full_prefix = format!("{}{}", insert_prefix, inner_prefix);
+        // Allow pipe chaining when the resolved value itself supports it
+        let pipeable = matches!(value_type_str(effective), "array" | "object" | "string");
+        return build_operator_items(value_type, &full_prefix, pipeable);
+    }
+
+    // 4. Path phase
+    build_path_items(current_value, inner_prefix, insert_prefix)
+}
+
+/// Generate condition-starter completions for use inside `select(…)`.
+///
+/// Public entry point — delegates to the recursive `generate_select_condition`
+/// engine with an empty insert prefix (raw condition content only).
+///
+/// insert_text is always just the condition content, not the full query.
+/// The dedicated apply function in accept.rs handles prepending `select(` and
+/// stripping the existing suffix.
+pub fn generate_select_starters(input_value: &Value, inner_prefix: &str) -> Vec<CompletionItem> {
+    generate_select_condition(input_value, inner_prefix, "")
+}
+
+fn param_field_completions(
+    query: &str,
+    input: &Value,
+    input_type: Option<&str>,
+    out: &mut Vec<CompletionItem>,
+) {
     let Some(ctx) = param_field_context(query) else {
         return;
     };
@@ -255,45 +742,63 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
     });
 
     if ctx.fn_name == "contains" {
-        match context_value {
+        let effective_value = match context_value {
+            Some(Value::Array(arr)) if input_type == Some("object") => arr.first(),
+            v => v,
+        };
+
+        match effective_value {
             Some(Value::Object(map)) => {
                 let open = query[..ctx.inner_start].rfind('(').unwrap_or(0);
                 let inner_full = &query[open + 1..];
-                let (used, value_key, key_prefix, value_prefix) =
-                    parse_contains_object_state(inner_full);
+
+                // Strip a stray leading `[` — user may have typed `[{` in an object context.
+                let t = inner_full.trim_start();
+                let effective_inner = if t.starts_with('[') {
+                    let idx = inner_full.find('[').unwrap_or(0);
+                    &inner_full[idx + 1..]
+                } else {
+                    inner_full
+                };
+
+                let (_used, value_key, key_prefix, value_prefix) =
+                    parse_contains_object_state(effective_inner);
+
+                // Use query[..open+1] (right after the opening paren) as the prefix base.
+                // Completed outer pairs are added by push_contains_value_items / key-listing
+                // via split_top_level_commas on effective_inner, so we don't need ctx.inner_start
+                // (which uses rfind(',') without depth and picks up commas inside nested braces).
+                let clean_prefix = query[..open + 1].to_string();
 
                 if let Some(key) = value_key {
-                    let mut value_base = query[..ctx.inner_start].to_string();
-                    if inner_full.trim_start().starts_with('{')
-                        && !value_base.ends_with('{')
-                        && !value_base.contains('{')
-                    {
-                        value_base.push('{');
-                    }
-                    for lit in scalar_values_for_key(input, ctx.context_path, &key) {
-                        if !lit.trim_matches('"').starts_with(&value_prefix) {
-                            continue;
-                        }
-                        let item = CompletionItem {
-                            label: lit.trim_matches('"').to_string(),
-                            detail: Some("contains object value".to_string()),
-                            insert_text: format!("{}{}: {}", value_base, key, lit),
-                        };
-                        if !out
-                            .iter()
-                            .any(|c| c.label == item.label && c.insert_text == item.insert_text)
-                        {
-                            out.push(item);
-                        }
-                    }
+                    push_contains_value_items(
+                        input,
+                        ctx.context_path,
+                        &clean_prefix,
+                        effective_inner,
+                        &key,
+                        &value_prefix,
+                        out,
+                    );
                 } else {
-                    let mut base = query[..ctx.inner_start].to_string();
+                    let mut base = clean_prefix.clone();
                     if !base.contains('{') {
                         base.push('{');
                     }
+                    // Include completed outer pairs so insert_text preserves them.
+                    if effective_inner.trim_start().starts_with('{') {
+                        let stripped = effective_inner.trim_start().trim_start_matches('{');
+                        let parts = split_top_level_commas(stripped);
+                        if parts.len() > 1 {
+                            for part in &parts[..parts.len() - 1] {
+                                base.push_str(part.trim_start());
+                                base.push_str(", ");
+                            }
+                        }
+                    }
 
                     for key in map.keys() {
-                        if used.contains(key) || !key.starts_with(&key_prefix) {
+                        if !key.starts_with(&key_prefix) {
                             continue;
                         }
                         let item = CompletionItem {
@@ -313,39 +818,62 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
             Some(Value::Array(arr)) => {
                 let open = query[..ctx.inner_start].rfind('(').unwrap_or(0);
                 let inner_full = &query[open + 1..];
-                let object_mode = {
-                    let t = inner_full.trim_start();
-                    t.starts_with('{') || (!t.starts_with('[') && arr.iter().any(Value::is_object))
-                };
+                let is_object_array = arr.iter().any(Value::is_object);
+                let t = inner_full.trim_start();
+                let object_mode = is_object_array
+                    && (t.is_empty()
+                        || t.starts_with('{')
+                        || (t.starts_with('[') && {
+                            let after = t.trim_start_matches('[').trim_start();
+                            after.is_empty() || after.starts_with('{')
+                        }));
 
                 if object_mode {
-                    let (used, value_key, key_prefix, value_prefix) =
-                        parse_contains_object_state(inner_full);
-                    if let Some(key) = value_key {
-                        let mut value_base = query[..ctx.inner_start].to_string();
-                        if !value_base.contains('{') {
-                            value_base.push('{');
-                        }
-                        for lit in scalar_values_for_key(input, ctx.context_path, &key) {
-                            if !lit.trim_matches('"').starts_with(&value_prefix) {
-                                continue;
-                            }
-                            let item = CompletionItem {
-                                label: lit.trim_matches('"').to_string(),
-                                detail: Some("contains object value".to_string()),
-                                insert_text: format!("{}{}: {}", value_base, key, lit),
-                            };
-                            if !out
-                                .iter()
-                                .any(|c| c.label == item.label && c.insert_text == item.insert_text)
-                            {
-                                out.push(item);
-                            }
-                        }
+                    // Strip a leading `[` so parsers see the `{...}` object content.
+                    let effective_inner = if t.starts_with('[') {
+                        let idx = inner_full.find('[').unwrap_or(0);
+                        &inner_full[idx + 1..]
                     } else {
-                        let mut base = query[..ctx.inner_start].to_string();
+                        inner_full
+                    };
+
+                    let (_used, value_key, key_prefix, value_prefix) =
+                        parse_contains_object_state(effective_inner);
+
+                    // Always anchor to right after `(` so arr_qp never includes partial
+                    // nested content from ctx.inner_start (which uses rfind(',') without
+                    // depth tracking and picks up commas inside nested braces).
+                    let arr_qp = format!("{}[", &query[..open + 1]);
+
+                    if let Some(key) = value_key {
+                        push_contains_value_items(
+                            input,
+                            ctx.context_path,
+                            &arr_qp,
+                            effective_inner,
+                            &key,
+                            &value_prefix,
+                            out,
+                        );
+                    } else {
+                        // Key-listing phase — ensure `[{` prefix exists.
+                        let mut base = arr_qp.clone();
                         if !base.contains('{') {
+                            if !base.ends_with('[') {
+                                base.push('[');
+                            }
                             base.push('{');
+                        }
+                        // Include completed outer pairs so insert_text preserves them.
+                        if effective_inner.trim_start().starts_with('{') {
+                            let stripped = effective_inner.trim_start().trim_start_matches('{');
+                            let parts = split_top_level_commas(stripped);
+                            if parts.len() > 1 {
+                                for part in &parts[..parts.len() - 1] {
+                                    base.push_str(part.trim_start());
+                                    base.push_str(", ");
+                                }
+                            }
                         }
                         let mut all_keys: BTreeSet<String> = BTreeSet::new();
                         for obj in arr.iter().filter_map(Value::as_object) {
@@ -354,7 +882,7 @@ fn param_field_completions(query: &str, input: &Value, out: &mut Vec<CompletionI
                             }
                         }
                         for key in all_keys {
-                            if used.contains(&key) || !key.starts_with(&key_prefix) {
+                            if !key.starts_with(&key_prefix) {
                                 continue;
                             }
                             let item = CompletionItem {
@@ -519,7 +1047,20 @@ fn scalar_json_literal(v: &Value) -> Option<String> {
     }
 }
 
-fn scalar_values_for_key(input: &Value, context_path: &str, key: &str) -> Vec<String> {
+/// Serialize a value as a JSON literal suitable for insertion into a `contains()` argument.
+/// Unlike `scalar_json_literal`, this also handles objects and arrays by serializing them
+/// to compact JSON so nested structures can be suggested (e.g. `{"type":"standard"}`).
+fn json_literal(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(format!("\"{}\"", s.replace('"', "\\\""))),
+        Value::Number(_) | Value::Bool(_) | Value::Null => Some(v.to_string()),
+        Value::Object(_) | Value::Array(_) => serde_json::to_string(v).ok(),
+    }
+}
+
+/// Collect distinct literal values for `key` found across all objects in the
+/// input. Handles both scalar and structured (object/array) field values.
+fn values_for_key(input: &Value, context_path: &str, key: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
     let source_values: Vec<&Value> = if is_path_like(context_path) {
         find_values_at_path(input, context_path)
@@ -530,13 +1071,13 @@ fn scalar_values_for_key(input: &Value, context_path: &str, key: &str) -> Vec<St
     for value in source_values {
         match value {
             Value::Object(map) => {
-                if let Some(lit) = map.get(key).and_then(scalar_json_literal) {
+                if let Some(lit) = map.get(key).and_then(json_literal) {
                     out.insert(lit);
                 }
             }
             Value::Array(arr) => {
                 for obj in arr.iter().filter_map(|v| v.as_object()) {
-                    if let Some(lit) = obj.get(key).and_then(scalar_json_literal) {
+                    if let Some(lit) = obj.get(key).and_then(json_literal) {
                         out.insert(lit);
                     }
                 }
@@ -547,6 +1088,278 @@ fn scalar_values_for_key(input: &Value, context_path: &str, key: &str) -> Vec<St
     out.into_iter().collect()
 }
 
+/// Check whether `field_key` holds object-type values in the given context data.
+fn is_field_object_type(input: &Value, context_path: &str, field_key: &str) -> bool {
+    let sources = if is_path_like(context_path) {
+        find_values_at_path(input, context_path)
+    } else {
+        vec![input]
+    };
+    sources.iter().any(|src| match src {
+        Value::Object(m) => matches!(m.get(field_key), Some(Value::Object(_))),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_object())
+            .any(|m| matches!(m.get(field_key), Some(Value::Object(_)))),
+        _ => false,
+    })
+}
+
+/// Collect distinct sub-keys from every nested object at `field_key` in the context data.
+fn collect_sub_keys(input: &Value, context_path: &str, field_key: &str) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let sources = if is_path_like(context_path) {
+        find_values_at_path(input, context_path)
+    } else {
+        vec![input]
+    };
+    for source in sources {
+        match source {
+            Value::Object(m) => {
+                if let Some(Value::Object(sub)) = m.get(field_key) {
+                    for k in sub.keys() {
+                        keys.insert(k.clone());
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for obj in arr.iter().filter_map(|v| v.as_object()) {
+                    if let Some(Value::Object(sub)) = obj.get(field_key) {
+                        for k in sub.keys() {
+                            keys.insert(k.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    keys
+}
+
+/// Collect distinct scalar literals for `sub_key` inside the nested object at `field_key`.
+fn values_for_sub_key(
+    input: &Value,
+    context_path: &str,
+    field_key: &str,
+    sub_key: &str,
+) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let sources = if is_path_like(context_path) {
+        find_values_at_path(input, context_path)
+    } else {
+        vec![input]
+    };
+    for source in sources {
+        match source {
+            Value::Object(m) => {
+                if let Some(Value::Object(sub)) = m.get(field_key)
+                    && let Some(lit) = sub.get(sub_key).and_then(scalar_json_literal)
+                {
+                    out.insert(lit);
+                }
+            }
+            Value::Array(arr) => {
+                for obj in arr.iter().filter_map(|v| v.as_object()) {
+                    if let Some(Value::Object(sub)) = obj.get(field_key)
+                        && let Some(lit) = sub.get(sub_key).and_then(scalar_json_literal)
+                    {
+                        out.insert(lit);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Push `contains()` value-phase completions for `key` into `out`.
+///
+/// For scalar-typed fields this offers the literal values found in the data.
+/// For object-typed fields this drives a nested `{sub_key: value}` builder so
+/// users can construct partial contains checks like
+/// `contains({customer: {customer_email: "alice@example.com"}})`.
+fn push_contains_value_items(
+    input: &Value,
+    context_path: &str,
+    query_inner_prefix: &str, // `query[..ctx.inner_start]`, e.g. `contains(`
+    inner_full: &str,
+    key: &str,
+    value_prefix: &str,
+    out: &mut Vec<CompletionItem>,
+) {
+    // Build the base text that precedes `key: value` in the insert_text.
+    let mut value_base = query_inner_prefix.to_string();
+    if inner_full.trim_start().starts_with('{')
+        && !value_base.ends_with('{')
+        && !value_base.contains('{')
+    {
+        value_base.push('{');
+    }
+    // Include any already-completed outer key-value pairs so that insert_text
+    // preserves them when accepting a suggestion for a later key.
+    // e.g. `{pair1, pair2, current: ` → value_base includes `{pair1, pair2, `.
+    if inner_full.trim_start().starts_with('{') {
+        let stripped = inner_full.trim_start().trim_start_matches('{');
+        let parts = split_top_level_commas(stripped);
+        if parts.len() > 1 {
+            for part in &parts[..parts.len() - 1] {
+                value_base.push_str(part.trim_start());
+                value_base.push_str(", ");
+            }
+        }
+    }
+
+    if is_field_object_type(input, context_path, key) {
+        // Object-typed field: nested builder instead of full-object serialization.
+        let vp = value_prefix.trim_start();
+
+        if !vp.starts_with('{') {
+            // No `{` typed yet — offer sub-keys with opening brace included so
+            // the insert completes to e.g. `contains({customer: {customer_email: `.
+            let sub_keys = collect_sub_keys(input, context_path, key);
+            for sub_key in &sub_keys {
+                // If the user started typing (without `{`), filter by that prefix.
+                if !vp.is_empty() && !sub_key.starts_with(vp) {
+                    continue;
+                }
+                let item = CompletionItem {
+                    label: sub_key.clone(),
+                    detail: Some("contains object key".to_string()),
+                    insert_text: format!("{}{}: {{{}: ", value_base, key, sub_key),
+                };
+                if !out.iter().any(|c| c.insert_text == item.insert_text) {
+                    out.push(item);
+                }
+            }
+        } else {
+            // `{` already typed — parse the nested object state.
+            let nested_content = &vp[1..]; // strip leading `{`
+            let base_prefix = format!("{}{}: {{", value_base, key); // e.g. `contains({customer: {`
+
+            let (nested_used, nested_value_key, nested_key_prefix, nested_value_prefix) =
+                parse_contains_object_state(&format!("{{{}", nested_content));
+
+            if let Some(ref sub_key) = nested_value_key {
+                // Sub-key chosen — suggest scalar values for it.
+                // Build nested_base to include already-completed pairs before this sub_key.
+                // Note: value_prefix comes from parse_contains_object_state which applies
+                // v.trim(), stripping any trailing space after "key:". Use "key:" (no space)
+                // as needle so rfind works regardless of trailing-space presence.
+                let needle = format!("{}:", sub_key);
+                let completed_before = nested_content
+                    .rfind(&needle)
+                    .map(|pos| &nested_content[..pos])
+                    .unwrap_or("");
+                let nested_base = format!("{}{}", base_prefix, completed_before);
+                for lit in values_for_sub_key(input, context_path, key, sub_key) {
+                    if !lit.trim_matches('"').starts_with(&nested_value_prefix) {
+                        continue;
+                    }
+                    let item = CompletionItem {
+                        label: lit.trim_matches('"').to_string(),
+                        detail: Some("contains object value".to_string()),
+                        insert_text: format!("{}{}: {}", nested_base, sub_key, lit),
+                    };
+                    if !out
+                        .iter()
+                        .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                    {
+                        out.push(item);
+                    }
+                }
+            } else {
+                // Still choosing a sub-key — include already-completed pairs in base.
+                let completed_raw =
+                    &nested_content[..nested_content.len() - nested_key_prefix.len()];
+                // Normalize trailing comma to ", " (v.trim() in parse_contains_object_state
+                // strips the space that follows the comma in the typed query).
+                let completed_buf;
+                let completed_before: &str = if completed_raw.ends_with(',') {
+                    completed_buf = format!("{} ", completed_raw);
+                    &completed_buf
+                } else {
+                    completed_raw
+                };
+                let nested_base = format!("{}{}", base_prefix, completed_before);
+                let sub_keys = collect_sub_keys(input, context_path, key);
+                for sub_key in &sub_keys {
+                    if nested_used.contains(sub_key) || !sub_key.starts_with(&nested_key_prefix) {
+                        continue;
+                    }
+                    let item = CompletionItem {
+                        label: sub_key.clone(),
+                        detail: Some("contains object key".to_string()),
+                        insert_text: format!("{}{}: ", nested_base, sub_key),
+                    };
+                    if !out
+                        .iter()
+                        .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+                    {
+                        out.push(item);
+                    }
+                }
+            }
+        }
+    } else {
+        // Scalar or other field — offer literal values.
+        for lit in values_for_key(input, context_path, key) {
+            if !lit.trim_matches('"').starts_with(value_prefix) {
+                continue;
+            }
+            let item = CompletionItem {
+                label: lit.trim_matches('"').to_string(),
+                detail: Some("contains object value".to_string()),
+                insert_text: format!("{}{}: {}", value_base, key, lit),
+            };
+            if !out
+                .iter()
+                .any(|c| c.label == item.label && c.insert_text == item.insert_text)
+            {
+                out.push(item);
+            }
+        }
+    }
+}
+
+/// Split `s` on commas that are at nesting depth 0 (not inside `{...}` or `"..."`).
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
 fn parse_contains_object_state(inner: &str) -> (HashSet<String>, Option<String>, String, String) {
     let mut used = HashSet::new();
     let mut s = inner.trim_start();
@@ -554,7 +1367,7 @@ fn parse_contains_object_state(inner: &str) -> (HashSet<String>, Option<String>,
         s = rest;
     }
 
-    let mut segments: Vec<&str> = s.split(',').collect();
+    let mut segments = split_top_level_commas(s);
     let current = segments.pop().unwrap_or("").trim();
 
     for seg in segments {
@@ -1027,6 +1840,9 @@ fn obj_constructor_completions(query: &str, input: &Value, out: &mut Vec<Complet
     // For  `.foo | {bar`  the context is `.foo`.
     let context_path = pipe_context_before(before_brace);
 
+    if !is_path_like(context_path) {
+        return;
+    }
     if let Some(Value::Object(map)) = find_value_at_path(input, context_path) {
         for key in map.keys() {
             if key.starts_with(partial_field) {
@@ -2081,6 +2897,228 @@ mod tests {
     }
 
     #[test]
+    fn contains_object_field_nested_object_suggests_sub_keys() {
+        // When a field holds a nested object, contains() at the value position should
+        // suggest the nested object's sub-keys (not the full serialized object),
+        // so the user can build `contains({metadata: {type: "standard"}})` step by step.
+        let input = json!([
+            {"id": 1, "metadata": {"type": "standard", "priority": 1}},
+            {"id": 2, "metadata": {"type": "express", "priority": 2}}
+        ]);
+
+        // At value position: suggest sub-keys with `[{` opener (array-of-objects form).
+        let c = get_completions("contains({metadata: ", &input);
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"type"),
+            "expected 'type' sub-key in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"priority"),
+            "expected 'priority' sub-key in {:?}",
+            labels
+        );
+        // insert_text rewrites to the correct `[{...}]` form since input is an array.
+        assert!(
+            has_insert(&c, "contains([{metadata: {type: "),
+            "expected nested object insert_text in {:?}",
+            c.iter().map(|i| i.insert_text.as_str()).collect::<Vec<_>>()
+        );
+
+        // After `{` typed: suggest sub-keys without opening brace
+        let c2 = get_completions("contains({metadata: {", &input);
+        let labels2: Vec<_> = c2.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels2.contains(&"type"),
+            "expected 'type' after '{{' in {:?}",
+            labels2
+        );
+
+        // After sub-key chosen: suggest scalar values
+        let c3 = get_completions("contains({metadata: {type: ", &input);
+        let labels3: Vec<_> = c3.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels3.contains(&"standard"),
+            "expected 'standard' value in {:?}",
+            labels3
+        );
+        assert!(
+            labels3.contains(&"express"),
+            "expected 'express' value in {:?}",
+            labels3
+        );
+        assert!(
+            has_insert(&c3, "contains([{metadata: {type: \"standard\""),
+            "expected full nested insert_text in {:?}",
+            c3.iter()
+                .map(|i| i.insert_text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contains_object_field_nested_object_pipe_context() {
+        // Nested object field via pipe context (.orders[] | contains(...))
+        let input = json!({
+            "orders": [
+                {"status": "ok", "metadata": {"type": "standard"}},
+                {"status": "ok", "metadata": {"type": "express"}}
+            ]
+        });
+
+        let c = get_completions(".orders[] | contains({metadata: ", &input);
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"type"),
+            "expected 'type' sub-key via pipe context in {:?}",
+            labels
+        );
+
+        // After sub-key chosen: scalar values for type
+        let c2 = get_completions(".orders[] | contains({metadata: {type: ", &input);
+        let labels2: Vec<_> = c2.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels2.contains(&"standard"),
+            "expected 'standard' via pipe context in {:?}",
+            labels2
+        );
+    }
+
+    #[test]
+    fn contains_array_of_objects_uses_bracket_brace_prefix() {
+        // When the input (or context value) is an array of objects, contains() completions
+        // must produce the `[{key: value}]` form so the query actually evaluates to true.
+        let input = json!([
+            {"customer": {"customer_id": "CUST-42", "customer_name": "Alice Korhonen"}, "total": 150},
+            {"customer": {"customer_id": "CUST-99", "customer_name": "Bob Smith"}, "total": 250}
+        ]);
+
+        // Top-level key suggestions should use `[{` prefix.
+        let c = get_completions("contains(", &input);
+        assert!(
+            has_insert(&c, "contains([{customer: "),
+            "expected '[{{customer: ' insert_text, got {:?}",
+            c.iter().map(|i| i.insert_text.as_str()).collect::<Vec<_>>()
+        );
+        assert!(has_insert(&c, "contains([{total: "));
+
+        // After `[{customer: ` — nested object builder: sub-keys with `[{customer: {` base.
+        let c2 = get_completions("contains([{customer: ", &input);
+        let labels2: Vec<_> = c2.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels2.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels2
+        );
+        assert!(
+            has_insert(&c2, "contains([{customer: {customer_id: "),
+            "expected nested sub-key insert_text, got {:?}",
+            c2.iter()
+                .map(|i| i.insert_text.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // After sub-key chosen — scalar value suggestions.
+        let c3 = get_completions("contains([{customer: {customer_id: ", &input);
+        let labels3: Vec<_> = c3.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels3.contains(&"CUST-42"),
+            "expected CUST-42 in {:?}",
+            labels3
+        );
+        assert!(
+            labels3.contains(&"CUST-99"),
+            "expected CUST-99 in {:?}",
+            labels3
+        );
+        assert!(
+            has_insert(&c3, "contains([{customer: {customer_id: \"CUST-42\""),
+            "expected full insert_text, got {:?}",
+            c3.iter()
+                .map(|i| i.insert_text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contains_orders_items_context_uses_object_form() {
+        // .orders[]|contains( → Object context (first array item) → `{key:` form, NOT `[{key:`
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_id": "CUST-42"}, "total": 150},
+                {"customer": {"customer_id": "CUST-99"}, "total": 250}
+            ]
+        });
+        let c = get_completions(".orders[]|contains(", &input);
+        assert!(
+            has_insert(&c, ".orders[]|contains({customer: "),
+            "expected {{customer: form, got {:?}",
+            c.iter().map(|i| i.insert_text.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            !has_insert(&c, ".orders[]|contains([{customer: "),
+            ".orders[]|contains( must NOT use [{{ form"
+        );
+
+        // .orders|contains( → Array context → `[{key:` form
+        let c2 = get_completions(".orders|contains(", &input);
+        assert!(
+            has_insert(&c2, ".orders|contains([{customer: "),
+            "expected [{{customer: form, got {:?}",
+            c2.iter()
+                .map(|i| i.insert_text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !has_insert(&c2, ".orders|contains({customer: "),
+            ".orders|contains( must NOT use plain {{ form"
+        );
+    }
+
+    #[test]
+    fn contains_nested_object_comma_continues_inner_suggestions() {
+        // After accepting a nested sub-key value, the comma should let user add MORE sub-keys
+        // not jump back to top-level keys. This requires depth-aware comma splitting.
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_id": "CUST-42", "customer_name": "Alice", "customer_email": "alice@example.com"}, "total": 150}
+            ]
+        });
+
+        // .orders|contains([{customer: {customer_id: "CUST-42", <cursor>
+        // Should suggest more customer sub-keys (customer_name, customer_email), NOT top-level order keys.
+        let c = get_completions(
+            ".orders|contains([{customer: {customer_id: \"CUST-42\", ",
+            &input,
+        );
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"customer_name") || labels.contains(&"customer_email"),
+            "expected customer sub-keys after nested comma, got {:?}",
+            labels
+        );
+        // Must NOT suggest top-level order keys at this point
+        assert!(
+            !labels.contains(&"total"),
+            "must not suggest top-level 'total' when inside nested object, got {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn contains_object_field_value_scalar_still_works() {
+        // Ensure scalar field value suggestions still function correctly
+        let input = json!([
+            {"id": 1, "status": "shipped"},
+            {"id": 2, "status": "pending"}
+        ]);
+        let c = get_completions("contains({status: ", &input);
+        assert!(has_label(&c, "shipped"), "expected 'shipped' in {:?}", c);
+        assert!(has_label(&c, "pending"), "expected 'pending' in {:?}", c);
+    }
+
+    #[test]
     fn contains_string_suggestions_include_tokenized_content() {
         let input = json!("hello world content");
 
@@ -2120,5 +3158,422 @@ mod tests {
 
         let c = get_completions("has(", &json!(42));
         assert!(c.iter().all(|i| !i.insert_text.starts_with("has(")));
+    }
+
+    #[test]
+    fn contains_nested_after_value_with_comma_suggests_next_key() {
+        // After accepting customer_email value (with trailing comma-space), should suggest
+        // remaining sub-keys of customer, NOT values.
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"}}
+            ]
+        });
+
+        let c = get_completions(
+            r#".orders | contains([{customer: {customer_email: "alice@example.com", "#,
+            &input,
+        );
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        let inserts: Vec<_> = c.iter().map(|i| i.insert_text.as_str()).collect();
+        eprintln!("labels: {:?}", labels);
+        eprintln!("inserts: {:?}", inserts);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"CUST-09"),
+            "should NOT suggest value CUST-09, got {:?}",
+            labels
+        );
+        assert!(
+            has_insert(
+                &c,
+                r#".orders | contains([{customer: {customer_email: "alice@example.com", customer_id: "#
+            ),
+            "expected insert_text with customer_id key (space after comma), got {:?}",
+            inserts
+        );
+    }
+
+    #[test]
+    fn contains_nested_second_customer_with_space_comma_suggests_next_key() {
+        // After completing first customer and partially building second customer with
+        // space-comma format (old builder output), should suggest customer_id as next key.
+        let input = json!({
+            "orders": [
+                {"customer": {"customer_email": "alice@example.com", "customer_id": "CUST-09", "customer_name": "Alice"},
+                 "items": [], "totals": {}}
+            ]
+        });
+        let query = r#".orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com" ,"#;
+        let c = get_completions(query, &input);
+        let labels: Vec<_> = c.iter().map(|i| i.label.as_str()).collect();
+        eprintln!("labels for second nested: {:?}", labels);
+        assert!(
+            labels.contains(&"customer_id"),
+            "expected customer_id in {:?}",
+            labels
+        );
+    }
+
+    // ── select_condition_context ──────────────────────────────────────────────
+
+    #[test]
+    fn select_ctx_detects_cursor_after_open_paren() {
+        let ctx = select_condition_context("select(").unwrap();
+        assert_eq!(ctx.inner_prefix, "");
+        assert_eq!(ctx.context_path, ".");
+    }
+
+    #[test]
+    fn select_ctx_detects_partial_inner_text() {
+        let ctx = select_condition_context("select(. >").unwrap();
+        assert_eq!(ctx.inner_prefix, ". >");
+        assert_eq!(ctx.context_path, ".");
+    }
+
+    #[test]
+    fn select_ctx_returns_none_after_closing_paren() {
+        assert!(select_condition_context("select()").is_none());
+        assert!(select_condition_context("select(. > 5)").is_none());
+    }
+
+    #[test]
+    fn select_ctx_handles_pipe_context() {
+        let ctx = select_condition_context(".[] | select(").unwrap();
+        assert_eq!(ctx.context_path, ".[]");
+        assert_eq!(ctx.inner_prefix, "");
+    }
+
+    #[test]
+    fn select_ctx_nested_parens_inside_condition() {
+        // When the cursor is inside `test(` (which is itself inside `select(`),
+        // the innermost unclosed paren belongs to `test`, not `select`.
+        // select_condition_context correctly returns None in this case.
+        assert!(select_condition_context(".[] | select(test(").is_none());
+    }
+
+    #[test]
+    fn select_ctx_none_for_other_functions() {
+        assert!(select_condition_context("has(").is_none());
+        assert!(select_condition_context("contains(").is_none());
+        assert!(select_condition_context("map(").is_none());
+    }
+
+    // ── generate_select_starters (two-phase wizard) ───────────────────────────
+
+    #[test]
+    fn select_starters_number_path_phase() {
+        // Phase 1 (empty inner_prefix): show path selector "."
+        let starters = generate_select_starters(&json!(42), "");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"."), "expected '.' in {:?}", labels);
+        // Full operator starters should NOT appear in path phase
+        assert!(
+            !labels.contains(&"> "),
+            "should not show '> ' in path phase"
+        );
+    }
+
+    #[test]
+    fn select_starters_number_operator_phase() {
+        // Phase 2 (inner_prefix = ". "): show comparison operators
+        let starters = generate_select_starters(&json!(42), ". ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"> "), "expected '> ' in {:?}", labels);
+        assert!(labels.contains(&"< "), "expected '< ' in {:?}", labels);
+        assert!(labels.contains(&"== "), "expected '== ' in {:?}", labels);
+        // insert_text includes the path prefix
+        let gt = starters.iter().find(|s| s.label == "> ").unwrap();
+        assert_eq!(gt.insert_text, ". > ");
+    }
+
+    #[test]
+    fn select_starters_string_path_phase() {
+        let starters = generate_select_starters(&json!("hello"), "");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"."), "expected '.' in {:?}", labels);
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"startswith("),
+            "expected 'startswith(' in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"test("),
+            "expected 'test(' in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_starters_string_operator_phase() {
+        let starters = generate_select_starters(&json!("hello"), ". ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"== "),
+            "expected '==' for string in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"!= "),
+            "expected '!=' for string in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_starters_object_path_phase_uses_keys() {
+        let input = json!({"age": 30, "name": "Alice"});
+        let starters = generate_select_starters(&input, "");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&".age"), "expected '.age' in {:?}", labels);
+        assert!(
+            labels.contains(&".name"),
+            "expected '.name' in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_starters_object_operator_phase_numeric_field() {
+        let input = json!({"age": 30, "name": "Alice"});
+        // Operator phase after selecting .age (a number field)
+        let starters = generate_select_starters(&input, ".age ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"> "),
+            "expected '> ' for numeric field in {:?}",
+            labels
+        );
+        // insert_text should be ".age > " etc.
+        let gt = starters.iter().find(|s| s.label == "> ").unwrap();
+        assert_eq!(gt.insert_text, ".age > ");
+    }
+
+    #[test]
+    fn select_starters_array_does_not_recurse_into_elements() {
+        // Array input → array-level starters, NOT element-type starters
+        let input = json!([1, 2, 3]);
+        let starters = generate_select_starters(&input, "");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        // Should NOT show ". > " (element-level numeric starter) — that's operator phase
+        assert!(
+            !labels.contains(&"> "),
+            "should not show '> ' in array path phase"
+        );
+        // Should show array-level selectors
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_starters_null_input() {
+        // Phase 1 path selector for null input
+        let starters = generate_select_starters(&json!(null), "");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"."),
+            "expected '.' for null in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn select_starters_value_phase_returns_empty() {
+        // After operator has been typed, no more starters
+        let starters = generate_select_starters(&json!(42), ". > ");
+        assert!(
+            starters.is_empty(),
+            "expected empty in value phase, got {:?}",
+            starters
+        );
+        let starters2 = generate_select_starters(&json!(42), ".age == ");
+        assert!(
+            starters2.is_empty(),
+            "expected empty for .age == value phase"
+        );
+    }
+
+    #[test]
+    fn select_starters_prefix_filter_dot_narrows_path_phase() {
+        let input = json!({"age": 30, "name": "Alice"});
+        let starters = generate_select_starters(&input, ".a");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        // .age matches, .name does not
+        assert!(labels.contains(&".age"), "expected '.age' in {:?}", labels);
+        assert!(!labels.contains(&".name"), ".name should not match '.a'");
+    }
+
+    #[test]
+    fn select_starters_insert_text_is_condition_content_only() {
+        // insert_text should NOT include the full query prefix
+        let starters = generate_select_starters(&json!(42), "");
+        for s in &starters {
+            assert!(
+                !s.insert_text.contains("select("),
+                "insert_text should not contain 'select(': {}",
+                s.insert_text
+            );
+        }
+    }
+
+    // ── Post-pipe phase tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn select_starters_array_field_operator_phase_offers_pipe() {
+        // Object with an array field → operator phase should offer `| ` continuation
+        let input = json!({"items": [1, 2, 3], "name": "Alice"});
+        let starters = generate_select_starters(&input, ".items ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"| "),
+            "expected '| ' for array field in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"!= null"),
+            "expected '!= null' for array field"
+        );
+        // Should NOT show numeric operators (array is not a number)
+        assert!(
+            !labels.contains(&"> "),
+            "should not show '> ' for array field"
+        );
+    }
+
+    #[test]
+    fn select_starters_post_pipe_path_phase_array() {
+        // After `.items | `, should suggest array functions
+        let input = json!({"items": [1, 2, 3]});
+        let starters = generate_select_starters(&input, ".items | ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' for array post-pipe in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"first"),
+            "expected 'first' for array post-pipe"
+        );
+        assert!(
+            labels.contains(&"map("),
+            "expected 'map(' for array post-pipe"
+        );
+    }
+
+    #[test]
+    fn select_starters_post_pipe_path_phase_string_field() {
+        // After `.name | `, should suggest string functions
+        let input = json!({"name": "Alice"});
+        let starters = generate_select_starters(&input, ".name | ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"length"),
+            "expected 'length' for string post-pipe"
+        );
+        assert!(
+            labels.contains(&"test("),
+            "expected 'test(' for string post-pipe"
+        );
+        assert!(
+            labels.contains(&"ascii_downcase"),
+            "expected 'ascii_downcase' for string post-pipe"
+        );
+    }
+
+    #[test]
+    fn select_starters_post_pipe_operator_phase() {
+        // After `.items | length `, should suggest numeric operators
+        let input = json!({"items": [1, 2, 3]});
+        let starters = generate_select_starters(&input, ".items | length ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&"> "),
+            "expected '> ' after 'length' in {:?}",
+            labels
+        );
+        assert!(labels.contains(&"< "), "expected '< ' after 'length'");
+        // insert_text should include the full condition
+        let gt = starters.iter().find(|s| s.label == "> ").unwrap();
+        assert_eq!(gt.insert_text, ".items | length > ");
+    }
+
+    #[test]
+    fn select_starters_post_pipe_value_phase_returns_empty() {
+        // After `.items | length > `, user is typing a value — nothing to suggest
+        let input = json!({"items": [1, 2, 3]});
+        let starters = generate_select_starters(&input, ".items | length > ");
+        assert!(
+            starters.is_empty(),
+            "expected empty in post-pipe value phase, got {:?}",
+            starters
+        );
+    }
+
+    #[test]
+    fn select_starters_multi_pipe_first_then_field() {
+        // .orders[]|select(.items | first | .qty == 2)
+        // After `.items | first | ` the value is the first element (an object),
+        // so we should see its fields as path starters.
+        let order = json!({"items": [{"qty": 2, "name": "widget"}]});
+        // Path phase after two pipes
+        let starters = generate_select_starters(&order, ".items | first | ");
+        let labels: Vec<_> = starters.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels.contains(&".qty"),
+            "expected '.qty' after 'first |' in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&".name"),
+            "expected '.name' after 'first |' in {:?}",
+            labels
+        );
+
+        // Operator phase after selecting .qty (a number)
+        let starters2 = generate_select_starters(&order, ".items | first | .qty ");
+        let labels2: Vec<_> = starters2.iter().map(|s| s.label.as_str()).collect();
+        assert!(
+            labels2.contains(&"== "),
+            "expected '==' for .qty in {:?}",
+            labels2
+        );
+        assert!(
+            labels2.contains(&"> "),
+            "expected '>' for .qty in {:?}",
+            labels2
+        );
+        let eq = starters2.iter().find(|s| s.label == "== ").unwrap();
+        assert_eq!(eq.insert_text, ".items | first | .qty == ");
+
+        // Value phase — nothing
+        let starters3 = generate_select_starters(&order, ".items | first | .qty == ");
+        assert!(starters3.is_empty(), "expected empty in value phase");
+    }
+
+    #[test]
+    fn select_starters_multi_pipe_insert_text_is_full_condition() {
+        // insert_text must always be the complete condition content at every level
+        let order = json!({"items": [{"qty": 2}]});
+        let starters = generate_select_starters(&order, ".items | first | ");
+        for s in &starters {
+            assert!(
+                s.insert_text.starts_with(".items | first | "),
+                "insert_text should start with full chain prefix: {}",
+                s.insert_text
+            );
+        }
     }
 }

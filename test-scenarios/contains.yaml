@@ -1,0 +1,36 @@
+meta:
+  created: "2026-04-24"
+  jqpp_version: "0.1.0"
+  jqpp_git_sha: "8020921"
+  topic: "contains-function"
+  description: "Scenarios covering contains() filter behaviour for objects and arrays"
+
+scenarios:
+  - id: contains-nested-object
+    description: "Check if order contains specific customer email"
+    input: |
+      [
+        {"order_id": 1, "customer": {"customer_name": "Alice", "customer_email": "alice@example.com"}},
+        {"order_id": 2, "customer": {"customer_name": "Bob", "customer_email": "bob@example.com"}}
+      ]
+    filter: ".[] | contains({customer: {customer_email: \"alice@example.com\"}})"
+    expected_output: |
+      true
+      false
+    tags: [contains, object, nested]
+    status: active
+
+  - id: contains-array-nested-object
+    description: "Check if orders array contains specific customer email inside an object"
+    input: |
+      {
+        "orders": [
+          {"order_id": 1, "customer": {"customer_name": "Mikko", "customer_email": "mikko@example.com"}},
+          {"order_id": 2, "customer": {"customer_name": "Bob", "customer_email": "bob@example.com"}}
+        ]
+      }
+    filter: ".orders | contains([{customer: {customer_email: \"mikko@example.com\"}}])"
+    expected_output: |
+      true
+    tags: [contains, array, nested]
+    status: active

@@ -78,6 +78,8 @@ pub struct App<'a> {
     pub dismissed_hint_query: Option<String>,
     pub raw_output: bool,
     pub wizard_state: Option<WizardState>,
+    /// Control-char–encoded startup key presses extracted from --query (\n=Enter, \t=Tab).
+    pub startup_keys: Option<String>,
 }
 
 impl<'a> Default for App<'a> {
@@ -117,6 +119,7 @@ impl<'a> App<'a> {
             dismissed_hint_query: None,
             raw_output: false,
             wizard_state: None,
+            startup_keys: None,
         }
     }
 

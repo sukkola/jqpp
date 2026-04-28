@@ -1,0 +1,249 @@
+meta:
+  created: "2026-04-24"
+  jqpp_version: "0.1.0"
+  jqpp_git_sha: "8020921"
+  topic: "contains-intellisense"
+  description: "Intellisense behaviour for contains() function with nested structures"
+
+scenarios:
+  - id: contains-object-suggests-sibling-fields
+    description: 'Inside contains({customer: {customer_email: "alice@example.com", ...}}), suggest other customer fields'
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_extract_suggestions]
+    actions:
+      - type: '.orders[] | contains({customer: {customer_email: "alice@example.com", '
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_id", "customer_name"]
+      - suggestions_not_contain: ["customer"]
+    status: active
+
+  - id: contains-array-suggests-sibling-fields
+    description: 'Inside contains([{customer: {customer_email: "mikko@example.com", ...}}]), suggest other customer fields'
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "mikko@example.com", '
+      - wait_stable: true
+    assertions:
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_id", "customer_name"]
+      - suggestions_not_contain: ["customer"]
+    status: active
+
+  - id: contains-tab-completes-object-start
+    description: "Tabbing into 'customer' after contains( results in object syntax {customer: "
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: ".orders[] | contains("
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: ".orders[] | contains({customer: "
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_email", "customer_id", "customer_name"]
+    status: active
+
+  - id: contains-tab-completes-object-start-value-field
+    description: "Tabbing into 'customer_email' after contains( results in object syntax [{customer: {customer_email: "
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: ".orders | contains([{customer: {customer_email: "
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", '
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_id","customer_name"]
+    status: active
+  
+  - id: contains-tab-completes-object-value-value-field
+    description: "Tabbing into 'customer_email' after contains( results in object syntax [{customer: {customer_email: "
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", '
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer_id: "CUST-09"'
+      - suggestions_visible: true
+      - suggestions_contain: ["CUST-09"]
+      - suggestions_not_contain: ["customer","customer_name"]
+    status: active
+  - id: contains-enter-approve-inner-object
+    description: "Enter on customer_email suggestion inside contains([{customer: { accepts value and shows outer object field suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: ".orders | contains([{customer: {customer_email: "
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer:'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer","items"]
+    status: active
+  - id: contains-esc-closes-suggestions
+    description: "Esc while suggestions are visible after a completed inner object value closes the suggestion box"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - wait_stable: true
+      - press: Esc
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}}]'
+      - suggestions_visible: false
+    status: active
+  - id: contains-enter-approve-inner-object-2
+    description: "Enter on customer_email suggestion inside contains([{customer: { accepts value and shows outer object field suggestions (repeat)"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: ".orders | contains([{customer: {customer_email: "
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer:'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer","items"]
+    status: active
+  - id: contains-esc-closes-outer-object
+    description: "Esc while positioned after a completed inner object value closes suggestions and leaves query intact"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - wait_stable: true
+      - press: Esc
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}}])'
+      - suggestions_visible: false
+    status: active
+  - id: contains-enter-continues-inner-object-outer-suggestion
+    description: "Enter while positioned after inner object value accepts selection and shows top-level array object field suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, '
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_email"]
+    status: active
+
+  - id: contains-esc-closes-inner-object-outer-suggestion
+    description: "Enter while positioned after inner object value accepts selection and shows top-level array object field suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"} ,'
+      - wait_stable: true
+      - press: Esc
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}}])'
+      - suggestions_visible: false
+    status: active
+  - id: contains-enter-closes-inner-object-outer-suggestion3
+    description: "Tab after typing 'customer:' as second outer field expands to nested object syntax and shows email value suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer:'
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "'
+      - suggestions_visible: true
+      - suggestions_contain: ["alice@example.com"]
+      - suggestions_not_contain: ["customer","items","totals","customer_email"]
+    status: active
+  - id: contains-enter-closes-second-level-inner-object-outer-suggestion
+    description: "Tab inside nested customer object after email value suggests next sibling field (customer_id)"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", '
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09"'
+      - suggestions_visible: true
+      - suggestions_contain: ["CUST-09","CUST-17","CUST-42"]
+      - suggestions_not_contain: ["customer","items","totals","customer_email"]
+    status: active
+  - id: contains-enter-closes-second-inner-object
+    description: "Enter on customer_email inside nested customer object accepts value and returns to top-level field suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: '
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com"}, customer:'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer","items","totals"]
+      - suggestions_not_contain: ["customer_email"]
+    status: active
+  - id: contains-tab-extends-second-inner-objects-fields
+    description: "Tab after customer_id value in nested object suggests remaining sibling fields of the customer object"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: '
+      - wait_stable: true
+      - press: Tab
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09", '
+      - suggestions_visible: true
+      - suggestions_contain: ["customer_name"]
+      - suggestions_not_contain: ["customer","items","totals","customer_id"]
+    status: active
+  - id: contains-enter-closes-second-inner-objects-fields
+    description: "Enter on customer_id field inside nested object accepts value, closes inner object, and shows outer field suggestions"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query, tui_extract_suggestions]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: '
+      - wait_stable: true
+      - press: Enter
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com"}, customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}'
+      - suggestions_visible: true
+      - suggestions_contain: ["customer","items","totals"]
+      - suggestions_not_contain: ["customer_email","customer_id","customer_name"]
+    status: active
+  - id: contains-esc-closes-second-inner-objects-fields
+    description: "Esc while viewing outer object suggestions after a completed nested customer object closes suggestion box"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_read_query]
+    actions:
+      - type: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}, '
+      - wait_stable: true
+      - press: Esc
+      - wait_stable: true
+    assertions:
+      - query_contains: '.orders | contains([{customer: {customer_email: "alice@example.com", customer: {customer_email: "alice@example.com", customer_id: "CUST-09"}}}]'
+      - suggestions_visible: false
+    status: active

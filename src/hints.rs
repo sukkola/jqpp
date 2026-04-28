@@ -25,6 +25,7 @@ pub fn maybe_activate_structural_hint(app: &mut App<'_>, query_prefix: &str) -> 
         }];
         app.query_input.suggestion_index = 0;
         app.query_input.suggestion_scroll = 0;
+        app.query_input.suggestion_anchor_col = Some(query_prefix.chars().count() as u16);
         return true;
     }
     false
@@ -33,6 +34,7 @@ pub fn maybe_activate_structural_hint(app: &mut App<'_>, query_prefix: &str) -> 
 pub fn dismiss_structural_hint(app: &mut App<'_>, query_prefix: &str) {
     app.structural_hint_active = false;
     app.query_input.show_suggestions = false;
+    app.query_input.suggestion_anchor_col = None;
     app.query_input.suggestions.clear();
     app.dismissed_hint_query = Some(query_prefix.to_string());
 }
@@ -74,6 +76,11 @@ pub fn open_suggestions_from_structural_hint(
         cached_pipe_type,
     );
     app.query_input.show_suggestions = !app.query_input.suggestions.is_empty();
+    app.query_input.suggestion_anchor_col = if app.query_input.show_suggestions {
+        Some(prefix.chars().count() as u16)
+    } else {
+        None
+    };
     app.structural_hint_active = false;
     *suggestion_active = true;
     if app.query_input.show_suggestions {

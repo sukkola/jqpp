@@ -1,0 +1,3 @@
+customer_email
+customer_id
+customer_name

@@ -1,0 +1,24 @@
+meta:
+  created: "2026-04-24"
+  jqpp_version: "jqpp 0.1.0"
+  jqpp_git_sha: "8020921"
+  topic: "select-intellisense"
+  description: "TUI intellisense scenario stubs for select()"
+
+scenarios:
+  - id: select-open-suggests
+    description: "After typing select( suggestions appear"
+    input_file: "demo/demo.json"
+    asserts_with: [tui_suggestion_box_visible, tui_extract_suggestions]
+    actions:
+    - type: "s"
+    - type: "e"
+    - type: "l"
+    - type: "e"
+    - type: "c"
+    - type: "t"
+    - type: "("
+    assertions:
+      - suggestions_visible: true
+      - suggestions_contain: []
+      - suggestions_not_contain: []
